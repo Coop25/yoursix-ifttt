@@ -170,7 +170,7 @@ func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleTestRule runs one rule's actions immediately. The body may carry an
+// handleTestRule starts one rule's actions immediately, in the background. The body may carry an
 // "event" payload; otherwise a sample matching the rule's trigger is used.
 func (s *Server) handleTestRule(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(r)
@@ -209,12 +209,27 @@ func (s *Server) handleTestRule(w http.ResponseWriter, r *http.Request) {
 	ev.EventID = "" // test runs never collide with real deliveries
 	raw, _ := json.Marshal(ev)
 
-	run, err := s.engine.RunRule(r.Context(), rule.Rule, ev, raw, "test:"+userFrom(r.Context()).Username)
+	run, err := s.engine.StartTestRun(r.Context(), rule.Rule, ev, raw, "test:"+userFrom(r.Context()).Username)
 	if err != nil {
 		s.storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"run": run, "event": ev, "matchesTrigger": rule.Trigger.Matches(ev)})
+	// The run continues in the background; the UI polls GET /api/runs/{id}.
+	writeJSON(w, http.StatusAccepted, map[string]any{"run": run, "event": ev, "matchesTrigger": rule.Trigger.Matches(ev)})
+}
+
+func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	run, err := s.store.GetRun(r.Context(), id)
+	if err != nil {
+		s.storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
 }
 
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {

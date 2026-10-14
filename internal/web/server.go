@@ -66,6 +66,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/rules/{id}", admin(s.handleUpdateRule))
 	mux.Handle("DELETE /api/rules/{id}", admin(s.handleDeleteRule))
 	mux.Handle("POST /api/rules/{id}/test", admin(s.handleTestRule))
+	mux.Handle("GET /api/runs/{id}", view(s.handleGetRun))
 	mux.Handle("GET /api/events", view(s.handleListEvents))
 	mux.Handle("GET /api/events/{id}", view(s.handleGetEvent))
 	mux.Handle("POST /api/events/{id}/replay", admin(s.handleReplayEvent))

@@ -10,11 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"yoursix-ifttt/internal/rules"
@@ -61,6 +64,12 @@ func NewRunner(defaultDiscordWebhook, version string) *Runner {
 // secrets resolves {{ secret }} for this run (nil = env secrets only); every
 // value it returns is masked in the recorded results.
 func (r *Runner) Run(ctx context.Context, actions []rules.Action, data map[string]any, secrets SecretLookup) (results []StepResult, ok bool) {
+	return r.RunWithProgress(ctx, actions, data, secrets, nil)
+}
+
+// RunWithProgress is Run, calling onStep (if set) with the results so far
+// after each action finishes, so long runs can be shown live.
+func (r *Runner) RunWithProgress(ctx context.Context, actions []rules.Action, data map[string]any, secrets SecretLookup, onStep func([]StepResult)) (results []StepResult, ok bool) {
 	if secrets == nil {
 		secrets = envOnly
 	}
@@ -95,6 +104,9 @@ func (r *Runner) Run(ctx context.Context, actions []rules.Action, data map[strin
 		}
 		redact(&res, used)
 		results = append(results, res)
+		if onStep != nil {
+			onStep(slices.Clone(results))
+		}
 		if ctx.Err() != nil {
 			stopped = true
 		}
@@ -188,7 +200,7 @@ func (r *Runner) runHTTP(ctx context.Context, a rules.Action, data map[string]an
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return explainHTTPError(err, req, timeout)
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized && a.Auth == "digest" {
@@ -208,7 +220,7 @@ func (r *Runner) runHTTP(ctx context.Context, a rules.Action, data map[string]an
 		req.Header.Set("Authorization", authz)
 		resp, err = client.Do(req)
 		if err != nil {
-			return err
+			return explainHTTPError(err, req, timeout)
 		}
 	}
 	defer drain(resp)
@@ -335,4 +347,41 @@ func SecretRefs(actions []rules.Action) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// explainHTTPError turns the usual network failures into messages that say
+// what to check. Rules typically call devices on the LAN, so the common
+// cause is that the app's container can't reach the device.
+func explainHTTPError(err error, req *http.Request, timeout time.Duration) error {
+	host := req.URL.Host
+	var dnsErr *net.DNSError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err):
+		return fmt.Errorf("no response from %s within %s: check it's reachable from the app's container (or raise the action's timeout)", host, timeout)
+	case errors.Is(err, context.Canceled):
+		return errors.New("cancelled: the app was shutting down")
+	case errors.As(err, &dnsErr):
+		return fmt.Errorf("can't resolve %q from the app's container: use an IP address or a name its DNS knows", req.URL.Hostname())
+	case isErrno(err, syscall.ECONNREFUSED, wsaECONNREFUSED):
+		return fmt.Errorf("%s refused the connection: wrong port, or the service isn't running", host)
+	case isErrno(err, syscall.EHOSTUNREACH, syscall.ENETUNREACH, wsaEHOSTUNREACH, wsaENETUNREACH):
+		return fmt.Errorf("%s is unreachable from the app's container: check its network routing", host)
+	}
+	return err
+}
+
+// Winsock reports these conditions with its own codes, so match both when the
+// app (or its tests) runs on Windows.
+const (
+	wsaENETUNREACH  syscall.Errno = 10051
+	wsaECONNREFUSED syscall.Errno = 10061
+	wsaEHOSTUNREACH syscall.Errno = 10065
+)
+
+func isErrno(err error, codes ...syscall.Errno) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	return slices.Contains(codes, errno)
 }

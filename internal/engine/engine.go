@@ -107,9 +107,12 @@ func (e *Engine) Dispatch(ctx context.Context, ev yoursix.Event, raw []byte, sou
 	return res, nil
 }
 
-// RunRule runs one rule against ev now, ignoring enabled/trigger/cooldown.
-// Used by the UI's "test" button. It blocks until the run finishes.
-func (e *Engine) RunRule(ctx context.Context, r rules.Rule, ev yoursix.Event, raw []byte, sourceIP string) (store.RunView, error) {
+// StartTestRun runs one rule against ev in the background, ignoring
+// enabled/trigger/cooldown (the UI's "Test" button). It returns as soon as
+// the run is recorded; poll the store for its progress. The run uses the
+// engine's context, not the request's, so a proxy timing out the HTTP
+// request (e.g. Cloudflare's 100s limit) can't cancel it midway.
+func (e *Engine) StartTestRun(ctx context.Context, r rules.Rule, ev yoursix.Event, raw []byte, sourceIP string) (store.RunView, error) {
 	row, _, err := e.store.InsertEvent(ctx, ev, raw, sourceIP, true)
 	if err != nil {
 		return store.RunView{}, err
@@ -118,15 +121,36 @@ func (e *Engine) RunRule(ctx context.Context, r rules.Rule, ev yoursix.Event, ra
 	if err != nil {
 		return store.RunView{}, err
 	}
-	steps, ok := e.runner.Run(ctx, r.Actions, ev.TemplateData(r.Name), e.secrets.LookupFor(ctx, r.UpdatedBy))
+
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		steps, ok := e.runner.RunWithProgress(e.ctx, r.Actions, ev.TemplateData(r.Name),
+			e.secrets.LookupFor(e.ctx, r.UpdatedBy), e.progress(runID))
+		e.finish(runID, r, ev, steps, ok)
+	}()
+	return store.RunView{ID: runID, EventRow: row, RuleID: r.ID, RuleName: r.Name, Status: store.RunRunning, Steps: []actions.StepResult{}}, nil
+}
+
+// progress saves a run's completed steps as it goes, so the UI can show
+// long runs live.
+func (e *Engine) progress(runID int64) func([]actions.StepResult) {
+	return func(steps []actions.StepResult) {
+		if err := e.store.UpdateRunSteps(context.Background(), runID, steps); err != nil {
+			e.log.Error("save run progress", "run", runID, "err", err)
+		}
+	}
+}
+
+func (e *Engine) finish(runID int64, r rules.Rule, ev yoursix.Event, steps []actions.StepResult, ok bool) {
 	status := store.RunOK
 	if !ok {
 		status = store.RunFailed
 	}
-	if err := e.store.FinishRun(context.WithoutCancel(ctx), runID, status, steps); err != nil {
-		return store.RunView{}, err
+	if err := e.store.FinishRun(context.Background(), runID, status, steps); err != nil {
+		e.log.Error("finish run", "rule", r.Name, "err", err)
 	}
-	return store.RunView{ID: runID, EventRow: row, RuleID: r.ID, RuleName: r.Name, Status: status, Steps: steps}, nil
+	e.log.Info("rule ran", "rule", r.Name, "status", status, "event", ev.Key())
 }
 
 // claim decides whether r may run now. It returns "" and reserves the run
@@ -205,15 +229,9 @@ func (e *Engine) startRun(row int64, r rules.Rule, ev yoursix.Event) {
 		}
 		defer func() { <-e.sem }()
 
-		steps, ok := e.runner.Run(e.ctx, r.Actions, ev.TemplateData(r.Name), e.secrets.LookupFor(e.ctx, r.UpdatedBy))
-		status := store.RunOK
-		if !ok {
-			status = store.RunFailed
-		}
-		if err := e.store.FinishRun(context.Background(), runID, status, steps); err != nil {
-			e.log.Error("finish run", "rule", r.Name, "err", err)
-		}
-		e.log.Info("rule ran", "rule", r.Name, "status", status, "event", ev.Key())
+		steps, ok := e.runner.RunWithProgress(e.ctx, r.Actions, ev.TemplateData(r.Name),
+			e.secrets.LookupFor(e.ctx, r.UpdatedBy), e.progress(runID))
+		e.finish(runID, r, ev, steps, ok)
 	}()
 }
 

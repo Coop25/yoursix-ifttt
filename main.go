@@ -110,8 +110,9 @@ func serve(log *slog.Logger) error {
 		Handler:           web.New(cfg, st, eng, sm, log, version).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		// Rule test runs are synchronous and may include delays.
-		WriteTimeout: 11 * time.Minute,
+		// Every handler answers quickly; rule runs (including tests) happen in
+		// the background, so no request needs to outlive a proxy's timeout.
+		WriteTimeout: time.Minute,
 		IdleTimeout:  2 * time.Minute,
 	}
 

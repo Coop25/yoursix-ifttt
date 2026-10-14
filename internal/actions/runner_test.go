@@ -126,3 +126,29 @@ func TestDiscordAction(t *testing.T) {
 		t.Fatalf("content = %v", got["content"])
 	}
 }
+
+func TestHTTPErrorsAreExplained(t *testing.T) {
+	// Accept connections but never answer, to force a timeout.
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer hang.Close()
+	closed := httptest.NewServer(http.NotFoundHandler())
+	refusedURL := closed.URL
+	closed.Close()
+
+	cases := []struct {
+		url, want string
+	}{
+		{hang.URL, "no response from"},
+		{refusedURL, "refused the connection"},
+		{"http://definitely-not-a-real-host.invalid/", "can't resolve"},
+	}
+	for _, c := range cases {
+		steps, ok := NewRunner("", "test").Run(context.Background(),
+			[]rules.Action{{Type: rules.ActionHTTP, URL: c.url, TimeoutSeconds: 1}}, nil, nil)
+		if ok || !strings.Contains(steps[0].Error, c.want) {
+			t.Errorf("%s: error %q, want it to contain %q", c.url, steps[0].Error, c.want)
+		}
+	}
+}

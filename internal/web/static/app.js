@@ -33,11 +33,20 @@ async function api(method, path, body) {
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data.error || `HTTP ${res.status}`);
+    const err = new Error(data.error || gatewayMessage(res.status) || `HTTP ${res.status}`);
     err.status = res.status;
     throw err;
   }
   return data;
+}
+
+// Errors from a proxy in front of the app (Cloudflare uses 52x) have no
+// JSON body; explain them instead of showing a bare status code.
+function gatewayMessage(status) {
+  if (status === 524) return "The request timed out at the proxy (HTTP 524): the app took longer than about 100 seconds to answer.";
+  if (status === 502 || status === 521 || status === 522 || status === 523) return `The app couldn't be reached through the proxy (HTTP ${status}). Is it running?`;
+  if (status === 503 || status === 504) return `The app is unavailable or timed out (HTTP ${status}). Try again in a moment.`;
+  return "";
 }
 
 const fmtDuration = (s) => (s % 3600 === 0 && s >= 3600 ? `${s / 3600}h` : s % 60 === 0 && s >= 60 ? `${s / 60}m` : `${s}s`);
@@ -195,19 +204,49 @@ async function deleteRule(r) {
   loadRules();
 }
 
+// Starts a test run, then polls it so each step shows up as it finishes.
+// The run lives on the server: closing the dialog doesn't stop it, and the
+// result stays in the Events tab.
 async function testRule(r) {
-  showResult(`Testing "${r.name}"…`, h("p.muted", {}, "Running actions with a sample event…"));
+  const token = (state.testToken = {});
+  showResult(`Testing "${r.name}"…`, h("p.muted", {}, "Starting…"));
+  let start;
   try {
-    const res = await api("POST", `/api/rules/${r.id}/test`, {});
-    showResult(`Test: ${r.name}`,
-      h("p", {}, `Status: `, h(`span.badge.${res.run.status}`, {}, res.run.status),
-        res.matchesTrigger ? "" : h("span.muted", {}, " (sample event would not match this trigger's filters)")),
-      renderSteps(res.run.steps),
-      h("details", {}, h("summary", {}, "Sample event used"), h("pre", {}, JSON.stringify(res.event, null, 2))),
-    );
+    start = await api("POST", `/api/rules/${r.id}/test`, {});
   } catch (e) {
     showResult("Test failed", h("p.error", {}, e.message));
+    return;
   }
+  const sample = h("details", {}, h("summary", {}, "Sample event used"), h("pre", {}, JSON.stringify(start.event, null, 2)));
+  const note = start.matchesTrigger ? "" : h("span.muted", {}, " (sample event would not match this trigger's filters)");
+  const total = r.actions.length;
+
+  const render = (run) => {
+    const running = run.status === "running";
+    showResult(`Test: ${r.name}`,
+      h("p", {}, "Status: ", h(`span.badge.${run.status}`, {}, running ? `running · step ${Math.min(run.steps.length + 1, total)} of ${total}` : run.status), note),
+      run.steps.length ? renderSteps(run.steps) : h("p.muted", {}, "Waiting for the first action…"),
+      running ? h("p.muted.small", {}, "You can close this dialog; the test keeps running and its result appears in the Events tab.") : null,
+      sample,
+    );
+  };
+
+  let run = start.run;
+  render(run);
+  const dlg = $("#result-dlg");
+  while (run.status === "running") {
+    await new Promise((res) => setTimeout(res, 1000));
+    // Stop polling if the dialog was closed or another test started.
+    if (!dlg.open || state.testToken !== token) return;
+    try {
+      run = await api("GET", `/api/runs/${run.id}`);
+    } catch (e) {
+      // A blip (e.g. a proxy hiccup) shouldn't end the view; keep trying.
+      continue;
+    }
+    if (state.testToken === token) render(run);
+  }
+  loadRules();
 }
 
 function renderSteps(steps) {
@@ -226,7 +265,7 @@ function renderSteps(steps) {
 
 function showResult(title, ...body) {
   $("#result-title").textContent = title;
-  $("#result-body").replaceChildren(...body);
+  $("#result-body").replaceChildren(...body.filter((b) => b !== null && b !== undefined && b !== ""));
   const dlg = $("#result-dlg");
   if (!dlg.open) dlg.showModal();
 }

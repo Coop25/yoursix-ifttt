@@ -514,6 +514,38 @@ func (s *Store) FinishRun(ctx context.Context, runID int64, status string, steps
 	return err
 }
 
+// UpdateRunSteps records progress on a run that is still going.
+func (s *Store) UpdateRunSteps(ctx context.Context, runID int64, steps []actions.StepResult) error {
+	b, err := json.Marshal(steps)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE runs SET steps_json=? WHERE id=? AND status=?`, string(b), runID, RunRunning)
+	return err
+}
+
+// GetRun returns one run, or ErrNotFound.
+func (s *Store) GetRun(ctx context.Context, runID int64) (RunView, error) {
+	var eventRow int64
+	err := s.db.QueryRowContext(ctx, `SELECT event_row FROM runs WHERE id=?`, runID).Scan(&eventRow)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RunView{}, ErrNotFound
+	}
+	if err != nil {
+		return RunView{}, err
+	}
+	runs, err := s.runsBetween(ctx, eventRow, eventRow)
+	if err != nil {
+		return RunView{}, err
+	}
+	for _, r := range runs {
+		if r.ID == runID {
+			return r, nil
+		}
+	}
+	return RunView{}, ErrNotFound
+}
+
 // FailInterruptedRuns marks runs left "running" by a previous process.
 func (s *Store) FailInterruptedRuns(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE runs SET status=?, finished_at=? WHERE status=?`, RunFailed, now(), RunRunning)

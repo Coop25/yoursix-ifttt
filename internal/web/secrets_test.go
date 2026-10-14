@@ -153,8 +153,18 @@ func TestSecretsAreOwnerScopedAndWriteOnly(t *testing.T) {
 	// Bob can run Alice's unchanged rule (it still runs as Alice, to Alice's
 	// URL), and the value is masked in everything recorded.
 	code, body = ta.do(t, ta.bob, "POST", fmt.Sprintf("/api/rules/%d/test", rule.ID), map[string]any{})
-	if code != 200 || !strings.Contains(body, `"status":"ok"`) {
+	if code != http.StatusAccepted {
 		t.Fatalf("test run: %d %s", code, body)
+	}
+	var started struct {
+		Run struct {
+			ID int64 `json:"id"`
+		} `json:"run"`
+	}
+	_ = json.Unmarshal([]byte(body), &started)
+	body = ta.waitRun(t, ta.bob, started.Run.ID)
+	if !strings.Contains(body, `"status":"ok"`) {
+		t.Fatalf("test run: %s", body)
 	}
 	if strings.Contains(body, secretValue) {
 		t.Fatalf("secret leaked in run result: %s", body)
@@ -214,5 +224,24 @@ func TestSecretsRequireAdmin(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("anonymous: %d", resp.StatusCode)
+	}
+}
+
+// waitRun polls a background run until it finishes and returns its JSON.
+func (ta *twoAdmins) waitRun(t *testing.T, who *http.Cookie, id int64) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		code, body := ta.do(t, who, "GET", fmt.Sprintf("/api/runs/%d", id), nil)
+		if code != 200 {
+			t.Fatalf("get run: %d %s", code, body)
+		}
+		if !strings.Contains(body, `"status":"running"`) {
+			return body
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %d never finished: %s", id, body)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
