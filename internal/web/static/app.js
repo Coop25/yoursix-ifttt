@@ -16,7 +16,7 @@ function h(tag, attrs, ...children) {
     else if (k === "checked") el.checked = v;
     else el.setAttribute(k, v === true ? "" : v);
   }
-  for (const c of children.flat()) {
+  for (const c of children.flat(Infinity)) {
     if (c === null || c === undefined || c === false) continue;
     el.append(c instanceof Node ? c : document.createTextNode(String(c)));
   }
@@ -97,6 +97,8 @@ async function boot() {
   wireEditor();
   wireSetup();
   wireSecrets();
+  wireDiscardDialog();
+  wireRequestEditor();
   $("#result-close").addEventListener("click", () => $("#result-dlg").close());
 
   window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
@@ -136,12 +138,13 @@ function renderMe() {
 }
 
 function showTab(tab) {
-  if (!["rules", "events", "setup", "secrets"].includes(tab) || (tab === "secrets" && !isAdmin())) tab = "rules";
+  if (!["rules", "requests", "events", "setup", "secrets"].includes(tab) || (tab === "secrets" && !isAdmin())) tab = "rules";
   if (location.hash !== `#${tab}`) history.replaceState(null, "", `#${tab}`);
   $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $$(".view").forEach((v) => v.classList.toggle("hidden", v.id !== `view-${tab}`));
   clearTimeout(state.eventsTimer);
   if (tab === "rules") loadRules();
+  if (tab === "requests") loadRequests();
   if (tab === "events") loadEvents();
   if (tab === "setup") loadSetup();
   if (tab === "secrets") loadSecrets();
@@ -149,7 +152,7 @@ function showTab(tab) {
 
 // ---------- rules ----------
 async function loadRules() {
-  state.rules = await api("GET", "/api/rules");
+  [state.rules, state.requests] = await Promise.all([api("GET", "/api/rules"), api("GET", "/api/requests")]);
   const list = $("#rules-list");
   if (!state.rules.length) {
     list.replaceChildren(h("div.empty", {}, isAdmin() ? "No rules yet. Create one to react to YourSix events." : "No rules yet."));
@@ -173,6 +176,11 @@ function actionSummary(a) {
   if (a.type === "http") return `${label}${a.method || "GET"} ${a.url}${a.auth ? ` (${a.auth} auth)` : ""}`;
   if (a.type === "delay") return `${label}wait ${a.delayMillis} ms`;
   if (a.type === "discord") return `${label}Discord: ${a.message}`;
+  if (a.type === "request") {
+    const sr = (state.requests || []).find((r) => r.id === a.requestId);
+    const params = Object.entries(a.params || {}).map(([k, v]) => `${k}=${v}`).join(", ");
+    return `${label}Saved request: ${sr ? sr.name : `#${a.requestId} (missing)`}${params ? ` (${params})` : ""}`;
+  }
   return label + a.type;
 }
 
@@ -204,11 +212,8 @@ async function deleteRule(r) {
   loadRules();
 }
 
-// Starts a test run, then polls it so each step shows up as it finishes.
-// The run lives on the server: closing the dialog doesn't stop it, and the
-// result stays in the Events tab.
+// Starts a rule test, then polls it so each step shows up as it finishes.
 async function testRule(r) {
-  const token = (state.testToken = {});
   showResult(`Testing "${r.name}"…`, h("p.muted", {}, "Starting…"));
   let start;
   try {
@@ -217,13 +222,20 @@ async function testRule(r) {
     showResult("Test failed", h("p.error", {}, e.message));
     return;
   }
-  const sample = h("details", {}, h("summary", {}, "Sample event used"), h("pre", {}, JSON.stringify(start.event, null, 2)));
   const note = start.matchesTrigger ? "" : h("span.muted", {}, " (sample event would not match this trigger's filters)");
-  const total = r.actions.length;
+  await pollRun(`Test: ${r.name}`, start, r.actions.length, note);
+  loadRules();
+}
 
+// pollRun shows a background run live in the result dialog until it ends.
+// The run lives on the server: closing the dialog doesn't stop it, and the
+// result stays in the Events tab.
+async function pollRun(title, start, total, note = "") {
+  const token = (state.testToken = {});
+  const sample = h("details", {}, h("summary", {}, "Sample event used"), h("pre", {}, JSON.stringify(start.event, null, 2)));
   const render = (run) => {
     const running = run.status === "running";
-    showResult(`Test: ${r.name}`,
+    showResult(title,
       h("p", {}, "Status: ", h(`span.badge.${run.status}`, {}, running ? `running · step ${Math.min(run.steps.length + 1, total)} of ${total}` : run.status), note),
       run.steps.length ? renderSteps(run.steps) : h("p.muted", {}, "Waiting for the first action…"),
       running ? h("p.muted.small", {}, "You can close this dialog; the test keeps running and its result appears in the Events tab.") : null,
@@ -240,13 +252,12 @@ async function testRule(r) {
     if (!dlg.open || state.testToken !== token) return;
     try {
       run = await api("GET", `/api/runs/${run.id}`);
-    } catch (e) {
+    } catch {
       // A blip (e.g. a proxy hiccup) shouldn't end the view; keep trying.
       continue;
     }
     if (state.testToken === token) render(run);
   }
-  loadRules();
 }
 
 function renderSteps(steps) {
@@ -285,6 +296,7 @@ const blankAction = (type) => ({
   http: { type: "http", name: "", method: "GET", url: "http://camera.local/axis-cgi/", auth: "digest", username: "root", password: '{{ secret "CAMERA_PASS" }}', headers: {}, body: "", timeoutSeconds: 10, insecureTLS: false, continueOnError: false },
   delay: { type: "delay", name: "", delayMillis: 1000 },
   discord: { type: "discord", name: "", webhookUrl: "", message: "{{ .event.eventDescription }} on {{ .data.deviceName }} ({{ .data.siteName }})" },
+  request: { type: "request", name: "", requestId: "", params: {} },
 }[type]);
 
 // Only the fields the API accepts.
@@ -301,7 +313,7 @@ function cleanRule(r) {
 }
 
 function wireEditor() {
-  wireEditorClose();
+  guardEditor("rule", $("#editor"), $("#editor-cancel"), editorState);
   $("#add-filter").addEventListener("click", () => addFilterRow({ field: "deviceName", op: "equals", value: "" }));
   $$("[data-add-action]").forEach((b) => b.addEventListener("click", () => addActionBox(blankAction(b.dataset.addAction))));
   $("#editor-json-mode").addEventListener("change", (e) => {
@@ -342,8 +354,10 @@ function wireEditor() {
   });
 }
 
-function openEditor(rule) {
+async function openEditor(rule) {
   state.editing = rule;
+  // Fresh list for the "Saved request" picker.
+  state.requests = await api("GET", "/api/requests");
   $("#editor-title").textContent = rule ? `Edit: ${rule.name}` : "New rule";
   $("#editor-error").textContent = "";
   $("#editor-json-mode").checked = false;
@@ -351,7 +365,7 @@ function openEditor(rule) {
   $("#editor-json").classList.add("hidden");
   fillVisual(cleanRule(rule ? structuredClone(rule) : blankRule()));
   $("#editor").showModal();
-  state.editorSnapshot = editorState();
+  guards.rule.snapshot();
 }
 
 function fillVisual(r) {
@@ -405,14 +419,19 @@ function addFilterRow(f) {
 
 const field = (label, input) => [h("span.muted", {}, label), input];
 
-function addActionBox(a) {
+// addActionBox renders an action's form into container (the rule editor's
+// action list by default). With fixed, it's the single request in the saved
+// request editor: no reorder/remove buttons, name or continue-on-error.
+function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
   const box = h("div.action-box", {});
   box.dataset.type = a.type;
   const head = h("div.action-head", {},
-    h("strong", {}, { http: "HTTP request", delay: "Delay", discord: "Discord message" }[a.type] || a.type),
-    h("button.btn.small", { type: "button", onclick: () => box.previousElementSibling && box.parentNode.insertBefore(box, box.previousElementSibling) }, "↑"),
-    h("button.btn.small", { type: "button", onclick: () => box.nextElementSibling && box.parentNode.insertBefore(box.nextElementSibling, box) }, "↓"),
-    h("button.btn.small.danger", { type: "button", onclick: () => box.remove() }, "✕"),
+    h("strong", {}, { http: "HTTP request", delay: "Delay", discord: "Discord message", request: "Saved request" }[a.type] || a.type),
+    ...(fixed ? [] : [
+      h("button.btn.small", { type: "button", onclick: () => box.previousElementSibling && box.parentNode.insertBefore(box, box.previousElementSibling) }, "↑"),
+      h("button.btn.small", { type: "button", onclick: () => box.nextElementSibling && box.parentNode.insertBefore(box.nextElementSibling, box) }, "↓"),
+      h("button.btn.small.danger", { type: "button", onclick: () => box.remove() }, "✕"),
+    ]),
   );
   const inp = (k, attrs = {}) => h("input", { "data-k": k, value: a[k] ?? "", ...attrs });
   let grid;
@@ -426,7 +445,7 @@ function addActionBox(a) {
     const body = h("textarea", { "data-k": "body", rows: 3, placeholder: "Optional request body (templated)" });
     body.value = a.body || "";
     grid = h("div.action-grid", {},
-      field("Name", inp("name", { placeholder: "optional label" })),
+      fixed ? null : field("Name", inp("name", { placeholder: "optional label" })),
       field("Method", method),
       field("URL", inp("url", { placeholder: "http://192.168.1.50/axis-cgi/io/port.cgi?action=2:/" })),
       field("Auth", auth),
@@ -438,7 +457,7 @@ function addActionBox(a) {
       field("Expect status", inp("expectStatus", { value: (a.expectStatus || []).join(","), placeholder: "default: any 2xx" })),
       field("Options", h("div.row", {},
         h("label.inline", {}, h("input", { type: "checkbox", "data-k": "insecureTLS", checked: !!a.insecureTLS }), "Allow self-signed TLS"),
-        h("label.inline", {}, h("input", { type: "checkbox", "data-k": "continueOnError", checked: !!a.continueOnError }), "Continue on error"))),
+        fixed ? null : h("label.inline", {}, h("input", { type: "checkbox", "data-k": "continueOnError", checked: !!a.continueOnError }), "Continue on error"))),
     );
   } else if (a.type === "delay") {
     grid = h("div.action-grid", {},
@@ -452,12 +471,57 @@ function addActionBox(a) {
       field("Webhook URL", inp("webhookUrl", { placeholder: "blank = Y6IFTTT_DISCORD_WEBHOOK_URL" })),
       field("Message", msg),
       field("Options", h("label.inline", {}, h("input", { type: "checkbox", "data-k": "continueOnError", checked: !!a.continueOnError }), "Continue on error")));
+  } else if (a.type === "request") {
+    grid = requestActionGrid(a, inp);
   } else {
     grid = h("pre", {}, JSON.stringify(a, null, 2));
     box.dataset.raw = JSON.stringify(a);
   }
   box.append(head, grid);
-  $("#f-actions").append(box);
+  container.append(box);
+  return box;
+}
+
+// requestActionGrid is the form for a "request" action: pick a saved request,
+// then fill in its parameters (inputs rebuilt when the choice changes).
+function requestActionGrid(a, inp) {
+  const known = state.requests || [];
+  const sel = h("select", { "data-k": "requestId" },
+    h("option", { value: "" }, known.length ? "Choose a saved request…" : "No saved requests yet (create one on the Requests tab)"),
+    known.map((r) => h("option", { value: r.id }, r.name)));
+  if (a.requestId && !known.some((r) => r.id === Number(a.requestId))) {
+    sel.append(h("option", { value: a.requestId }, `#${a.requestId} (missing)`));
+  }
+  sel.value = a.requestId ? String(a.requestId) : "";
+
+  const summary = h("div.muted.small.request-summary", {});
+  const paramsBox = h("div.params-box", {});
+  let values = { ...(a.params || {}) };
+  const render = () => {
+    // Keep what was typed when switching back and forth.
+    for (const el of $$("[data-param]", paramsBox)) values[el.dataset.param] = el.value;
+    const sr = known.find((r) => r.id === Number(sel.value));
+    summary.textContent = sr ? `${sr.request.method || "GET"} ${sr.request.url}${sr.description ? ` · ${sr.description}` : ""}` : "";
+    if (!sr) {
+      paramsBox.replaceChildren();
+      return;
+    }
+    paramsBox.replaceChildren(...(sr.params.length
+      ? sr.params.map((p) => h("label.param-input", {},
+        h("span", {}, p.name, p.default ? "" : h("span.error", { title: "required" }, " *")),
+        h("input", { "data-param": p.name, value: values[p.name] ?? "", placeholder: p.default ? `default: ${p.default}` : (p.description || "required") }),
+        p.description && p.default ? h("span.muted.small", {}, p.description) : null))
+      : [h("span.muted.small", {}, "This request has no parameters.")]));
+  };
+  sel.addEventListener("change", render);
+  render();
+
+  return h("div.action-grid", {},
+    field("Name", inp("name", { placeholder: "optional label (defaults to the request's name)" })),
+    field("Request", h("div", {}, sel, summary)),
+    field("Parameters", paramsBox),
+    field("Options", h("label.inline", {}, h("input", { type: "checkbox", "data-k": "continueOnError", checked: !!a.continueOnError }), "Continue on error")),
+  );
 }
 
 function readAction(box) {
@@ -477,11 +541,18 @@ function readAction(box) {
     } else if (k === "expectStatus") {
       const codes = el.value.split(",").map((s) => parseInt(s, 10)).filter((n) => n > 0);
       if (codes.length) a.expectStatus = codes;
+    } else if (k === "requestId") {
+      if (el.value !== "") a.requestId = Number(el.value);
     } else if (["timeoutSeconds", "delayMillis"].includes(k)) {
       if (el.value !== "") a[k] = Number(el.value);
     } else if (el.value !== "") {
       a[k] = el.value;
     }
+  }
+  if (a.type === "request") {
+    const params = {};
+    for (const el of $$("[data-param]", box)) if (el.value !== "") params[el.dataset.param] = el.value;
+    if (Object.keys(params).length) a.params = params;
   }
   return a;
 }
@@ -754,21 +825,23 @@ function editorState() {
   return canonical(cleanRule(readVisual()));
 }
 
-const editorDirty = () => state.editorSnapshot !== undefined && editorState() !== state.editorSnapshot;
-
-// Close the editor, asking first when there's something to lose.
-function requestEditorClose() {
-  if (!editorDirty()) {
-    $("#editor").close();
-    return;
-  }
-  const confirmDlg = $("#discard-dlg");
-  if (!confirmDlg.open) confirmDlg.showModal();
-}
-
-function wireEditorClose() {
-  const dlg = $("#editor");
-  $("#editor-cancel").addEventListener("click", requestEditorClose);
+// guardEditor makes an editor dialog close on a backdrop click, Esc or its
+// Cancel button, asking first (via the shared #discard-dlg) when stateFn()
+// differs from the snapshot taken when it was opened.
+const guards = {};
+function guardEditor(key, dlg, cancelBtn, stateFn) {
+  let snap;
+  const dirty = () => snap !== undefined && stateFn() !== snap;
+  const requestClose = () => {
+    if (!dirty()) {
+      dlg.close();
+      return;
+    }
+    state.discardTarget = dlg;
+    const confirmDlg = $("#discard-dlg");
+    if (!confirmDlg.open) confirmDlg.showModal();
+  };
+  cancelBtn.addEventListener("click", requestClose);
 
   // Backdrop clicks land on the <dialog> element itself, but so do clicks on
   // its scrollbar, so test the point against the dialog's box. Require the
@@ -780,7 +853,7 @@ function wireEditorClose() {
   let pressedOutside = false;
   dlg.addEventListener("mousedown", (e) => { pressedOutside = e.target === dlg && outside(e); });
   dlg.addEventListener("click", (e) => {
-    if (pressedOutside && e.target === dlg && outside(e)) requestEditorClose();
+    if (pressedOutside && e.target === dlg && outside(e)) requestClose();
     pressedOutside = false;
   });
   // Esc. Chrome doesn't always let a page cancel the dialog's own "cancel"
@@ -790,19 +863,25 @@ function wireEditorClose() {
     if (e.key !== "Escape" || $("#discard-dlg").open) return;
     e.preventDefault();
     e.stopPropagation();
-    requestEditorClose();
+    requestClose();
   });
   dlg.addEventListener("cancel", (e) => {
     e.preventDefault();
-    requestEditorClose();
+    requestClose();
   });
-  dlg.addEventListener("close", () => { state.editorSnapshot = undefined; });
+  dlg.addEventListener("close", () => { snap = undefined; });
 
+  guards[key] = { dirty, requestClose, snapshot: () => { snap = stateFn(); } };
+  return guards[key];
+}
+
+// The "Discard unsaved changes?" dialog is shared by every guarded editor.
+function wireDiscardDialog() {
   const confirmDlg = $("#discard-dlg");
   $("#discard-keep").addEventListener("click", () => confirmDlg.close());
   $("#discard-yes").addEventListener("click", () => {
     confirmDlg.close();
-    dlg.close();
+    if (state.discardTarget) state.discardTarget.close();
   });
   // Clicking the confirm dialog's own backdrop means "keep editing".
   confirmDlg.addEventListener("click", (e) => {
@@ -833,4 +912,151 @@ async function reloadUI(e) {
   } finally {
     location.reload();
   }
+}
+
+// ---------- saved requests ----------
+async function loadRequests() {
+  state.requests = await api("GET", "/api/requests");
+  const list = $("#requests-list");
+  if (!state.requests.length) {
+    list.replaceChildren(h("div.empty", {}, isAdmin() ? "No saved requests yet. Create one to reuse it across rules." : "No saved requests yet."));
+    return;
+  }
+  list.replaceChildren(...state.requests.map(requestCard));
+}
+
+function requestCard(sr) {
+  const admin = isAdmin();
+  const req = sr.request;
+  const usesSecrets = /\bsecret\s+"/.test([req.url, req.body, req.password, ...Object.values(req.headers || {})].join(" "));
+  return h("div.card", {},
+    h("div.card-head", {},
+      h("h3", {}, sr.name),
+      req.auth ? h("span.badge", {}, `${req.auth} auth`) : null,
+      usesSecrets ? h("span.badge", { title: "Uses secrets: only rules of the admin who saved it can use it" }, "uses secrets") : null,
+      admin ? h("button.btn.small", { onclick: () => testRequest(sr) }, "Test") : null,
+      admin ? h("button.btn.small", { onclick: () => openRequestEditor(sr) }, "Edit") : null,
+      admin ? h("button.btn.small.danger", { onclick: () => deleteRequest(sr) }, "Delete") : null,
+    ),
+    sr.description ? h("p.summary", {}, sr.description) : null,
+    h("p.request-line", {}, `${req.method || "GET"} ${req.url}`),
+    sr.params.length
+      ? h("p.summary", {}, "Parameters: ", sr.params.map((p) => h("span.badge", { title: p.description || "" }, p.default ? `${p.name} = ${p.default}` : `${p.name} (required)`)))
+      : null,
+    h("p.summary", {}, sr.usedBy.length ? ["Used by: ", sr.usedBy.map((r) => h("span.badge", {}, r.name))] : "Not used by any rule yet."),
+    sr.updatedByName && state.me && sr.updatedBy !== state.me.id
+      ? h("p.muted.small", {}, `Saved by ${sr.updatedByName}.`)
+      : null,
+  );
+}
+
+const blankRequest = () => ({ name: "", description: "", params: [], request: { ...blankAction("http"), name: undefined, continueOnError: undefined } });
+
+function addParamRow(p = {}) {
+  const row = h("div.param-row", {},
+    h("input.p-name", { value: p.name || "", placeholder: "name, e.g. preset", "aria-label": "Parameter name" }),
+    h("input.p-default", { value: p.default || "", placeholder: "default (empty = required)", "aria-label": "Default value" }),
+    h("input.p-desc", { value: p.description || "", placeholder: "description (shown to rule editors)", "aria-label": "Description" }),
+    h("button.btn.small.danger", { type: "button", "aria-label": "Remove parameter", onclick: () => row.remove() }, "✕"),
+  );
+  $("#r-params").append(row);
+}
+
+function readRequestForm() {
+  const box = $("#r-request .action-box");
+  const request = box ? readAction(box) : {};
+  return {
+    name: $("#r-name").value.trim(),
+    description: $("#r-desc").value.trim(),
+    params: $$("#r-params .param-row").map((row) => {
+      const p = { name: $(".p-name", row).value.trim() };
+      const d = $(".p-default", row).value;
+      const desc = $(".p-desc", row).value.trim();
+      if (d !== "") p.default = d;
+      if (desc) p.description = desc;
+      return p;
+    }).filter((p) => p.name),
+    request,
+  };
+}
+
+function openRequestEditor(sr) {
+  state.editingRequest = sr;
+  const v = sr ? structuredClone(sr) : blankRequest();
+  $("#req-title").textContent = sr ? `Edit: ${sr.name}` : "New saved request";
+  $("#req-error").textContent = "";
+  $("#r-name").value = v.name;
+  $("#r-desc").value = v.description || "";
+  $("#r-params").replaceChildren();
+  (v.params || []).forEach(addParamRow);
+  $("#r-request").replaceChildren();
+  addActionBox({ ...v.request, type: "http" }, $("#r-request"), { fixed: true });
+  $("#req-editor").showModal();
+  guards.request.snapshot();
+}
+
+function wireRequestEditor() {
+  guardEditor("request", $("#req-editor"), $("#req-cancel"), () => canonical(readRequestForm()));
+  $("#new-request").addEventListener("click", () => openRequestEditor(null));
+  $("#r-add-param").addEventListener("click", () => addParamRow());
+  $("#req-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = $("#req-error");
+    err.textContent = "";
+    const body = readRequestForm();
+    try {
+      if (state.editingRequest) await api("PUT", `/api/requests/${state.editingRequest.id}`, body);
+      else await api("POST", "/api/requests", body);
+      $("#req-editor").close();
+      loadRequests();
+    } catch (ex) {
+      err.textContent = ex.message;
+    }
+  });
+}
+
+async function deleteRequest(sr) {
+  if (!confirm(`Delete saved request "${sr.name}"?`)) return;
+  try {
+    await api("DELETE", `/api/requests/${sr.id}`);
+  } catch (e) {
+    alert(`Can't delete "${sr.name}": ${e.message}`);
+  }
+  loadRequests();
+}
+
+// testRequest runs a saved request on its own. With parameters, it first
+// asks for their values (defaults pre-filled).
+function testRequest(sr) {
+  const run = async (params) => {
+    showResult(`Testing "${sr.name}"…`, h("p.muted", {}, "Starting…"));
+    let start;
+    try {
+      start = await api("POST", `/api/requests/${sr.id}/test`, { params });
+    } catch (e) {
+      showResult("Test failed", h("p.error", {}, e.message));
+      return;
+    }
+    await pollRun(`Test: ${sr.name}`, start, 1);
+    loadRequests();
+  };
+  if (!sr.params.length) {
+    run({});
+    return;
+  }
+  const form = h("form.params-box", {},
+    sr.params.map((p) => h("label.param-input", {},
+      h("span", {}, p.name, p.default ? "" : h("span.error", { title: "required" }, " *")),
+      h("input", { "data-param": p.name, value: p.default || "", placeholder: p.description || "", required: !p.default }))),
+    h("p.muted.small", {}, "Values can use event data, e.g. {{ .data.deviceName }}; a sample motion event is used."),
+    h("div.row", {}, h("button.btn.primary", { type: "submit" }, "Run test")),
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const params = {};
+    for (const el of $$("[data-param]", form)) if (el.value !== "") params[el.dataset.param] = el.value;
+    run(params);
+  });
+  showResult(`Test: ${sr.name}`, form);
+  $("input", form)?.focus();
 }

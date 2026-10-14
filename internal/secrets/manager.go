@@ -100,6 +100,24 @@ func (m *Manager) List(ctx context.Context, ownerID string) ([]store.SecretMeta,
 			}
 		}
 	}
+	reqs, err := m.store.ListRequests(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, sr := range reqs {
+		if sr.UpdatedBy != ownerID {
+			continue
+		}
+		refs, err := actions.SecretRefs([]rules.Action{sr.Request})
+		if err != nil {
+			continue
+		}
+		for i := range list {
+			if slices.Contains(refs, list[i].Name) {
+				list[i].UsedBy = append(list[i].UsedBy, "Request: "+sr.Name)
+			}
+		}
+	}
 	return list, nil
 }
 
@@ -139,6 +157,9 @@ func (m *Manager) LookupFor(ctx context.Context, ownerID string) actions.SecretL
 // CheckRule verifies every secret the actions reference is usable by
 // editorID, so a rule can't be saved pointing at someone else's secret.
 func (m *Manager) CheckRule(ctx context.Context, editorID string, acts []rules.Action) error {
+	if err := actions.ParamSecretRefs(acts); err != nil {
+		return err
+	}
 	refs, err := actions.SecretRefs(acts)
 	if err != nil {
 		return err

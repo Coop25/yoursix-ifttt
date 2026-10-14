@@ -154,3 +154,13 @@ dialog.confirm p { margin: 0; }
 .avatar-btn:disabled { cursor: progress; }
 @keyframes avatar-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .avatar-btn.spinning::after { animation: none; } }
+.param-row { display: grid; grid-template-columns: 1fr 1fr 2fr auto; gap: 8px; margin-bottom: 8px; }
+.params-box { display: grid; gap: 8px; }
+.param-input { display: grid; grid-template-columns: 140px 1fr; align-items: center; gap: 4px 8px; font-weight: 400; }
+.param-input .muted { grid-column: 2; }
+.request-summary { margin-top: 4px; word-break: break-all; }
+.card .request-line { margin: 6px 0 0; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; word-break: break-all; }
+@media (max-width: 640px) {
+  .param-row, .param-input { grid-template-columns: 1fr; }
+  .param-input .muted { grid-column: 1; }
+}

@@ -45,6 +45,26 @@ type Runner struct {
 	insecureClient *http.Client
 	discordDefault string
 	userAgent      string
+
+	// Requests resolves "request" actions to saved requests. Nil disables them.
+	Requests SavedRequestSource
+}
+
+// SavedRequestSource looks up saved requests by ID (the store implements it).
+type SavedRequestSource interface {
+	SavedRequest(ctx context.Context, id int64) (rules.SavedRequest, error)
+}
+
+// RunOptions configures one run.
+type RunOptions struct {
+	// Secrets resolves {{ secret }} (nil = env secrets only). Every value it
+	// returns is masked in the recorded results.
+	Secrets SecretLookup
+	// Owner is the Discord ID of the rule's owner (who last saved it). Saved
+	// requests that use secrets only run for their own owner's rules.
+	Owner string
+	// OnStep, if set, gets the results so far after each action finishes.
+	OnStep func([]StepResult)
 }
 
 func NewRunner(defaultDiscordWebhook, version string) *Runner {
@@ -61,15 +81,14 @@ func NewRunner(defaultDiscordWebhook, version string) *Runner {
 
 // Run executes actions in order. It stops at the first failure unless that
 // action sets ContinueOnError; remaining actions are reported as skipped.
-// secrets resolves {{ secret }} for this run (nil = env secrets only); every
-// value it returns is masked in the recorded results.
+// secrets resolves {{ secret }} for this run (nil = env secrets only).
 func (r *Runner) Run(ctx context.Context, actions []rules.Action, data map[string]any, secrets SecretLookup) (results []StepResult, ok bool) {
-	return r.RunWithProgress(ctx, actions, data, secrets, nil)
+	return r.RunWith(ctx, actions, data, RunOptions{Secrets: secrets})
 }
 
-// RunWithProgress is Run, calling onStep (if set) with the results so far
-// after each action finishes, so long runs can be shown live.
-func (r *Runner) RunWithProgress(ctx context.Context, actions []rules.Action, data map[string]any, secrets SecretLookup, onStep func([]StepResult)) (results []StepResult, ok bool) {
+// RunWith is Run with full options.
+func (r *Runner) RunWith(ctx context.Context, actions []rules.Action, data map[string]any, opts RunOptions) (results []StepResult, ok bool) {
+	secrets, onStep := opts.Secrets, opts.OnStep
 	if secrets == nil {
 		secrets = envOnly
 	}
@@ -91,7 +110,7 @@ func (r *Runner) RunWithProgress(ctx context.Context, actions []rules.Action, da
 			continue
 		}
 		start := time.Now()
-		err := r.runOne(ctx, a, data, lk, &res)
+		err := r.runOne(ctx, a, data, lk, opts.Owner, &res)
 		res.DurationMs = time.Since(start).Milliseconds()
 		if err != nil {
 			res.Error = err.Error()
@@ -114,7 +133,7 @@ func (r *Runner) RunWithProgress(ctx context.Context, actions []rules.Action, da
 	return results, ok
 }
 
-func (r *Runner) runOne(ctx context.Context, a rules.Action, data map[string]any, lk SecretLookup, res *StepResult) error {
+func (r *Runner) runOne(ctx context.Context, a rules.Action, data map[string]any, lk SecretLookup, owner string, res *StepResult) error {
 	switch a.Type {
 	case rules.ActionDelay:
 		t := time.NewTimer(time.Duration(a.DelayMillis) * time.Millisecond)
@@ -129,6 +148,8 @@ func (r *Runner) runOne(ctx context.Context, a rules.Action, data map[string]any
 		return r.runHTTP(ctx, a, data, lk, res)
 	case rules.ActionDiscord:
 		return r.runDiscord(ctx, a, data, lk, res)
+	case rules.ActionRequest:
+		return r.runSavedRequest(ctx, a, data, lk, owner, res)
 	}
 	return fmt.Errorf("unknown action type %q", a.Type)
 }
@@ -297,6 +318,9 @@ func CheckTemplates(actions []rules.Action) error {
 		for _, v := range a.Headers {
 			fields = append(fields, v)
 		}
+		for _, v := range a.Params {
+			fields = append(fields, v)
+		}
 		for _, f := range fields {
 			if err := CheckTemplate(f); err != nil {
 				return fmt.Errorf("action %d: %w", i+1, err)
@@ -384,4 +408,81 @@ func isErrno(err error, codes ...syscall.Errno) bool {
 		return false
 	}
 	return slices.Contains(codes, errno)
+}
+
+// noSecrets rejects {{ secret }} in saved-request parameters: a rule's
+// parameters may be fed into a request someone else wrote (and could point
+// anywhere), so they must never carry secrets.
+func noSecrets(string) (string, error) {
+	return "", errors.New("secrets can't be used in saved-request parameters; put the secret in the saved request itself")
+}
+
+func (r *Runner) runSavedRequest(ctx context.Context, a rules.Action, data map[string]any, lk SecretLookup, owner string, res *StepResult) error {
+	if r.Requests == nil {
+		return errors.New("saved requests are not available")
+	}
+	sr, err := r.Requests.SavedRequest(ctx, a.RequestID)
+	if err != nil {
+		return fmt.Errorf("saved request #%d: %w", a.RequestID, err)
+	}
+	if res.Name == "" {
+		res.Name = sr.Name
+	}
+	// Re-checked at run time, against the request as it is now.
+	refs, err := SecretRefs([]rules.Action{sr.Request})
+	if err != nil {
+		return fmt.Errorf("saved request %q: %w", sr.Name, err)
+	}
+	if len(refs) > 0 && sr.UpdatedBy != owner {
+		return fmt.Errorf("saved request %q uses secrets belonging to %s; only their rules can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))
+	}
+
+	given := make(map[string]string, len(a.Params))
+	for k, v := range a.Params {
+		rv, err := Render(v, data, noSecrets)
+		if err != nil {
+			return fmt.Errorf("parameter %s: %w", k, err)
+		}
+		given[k] = rv
+	}
+	params, err := sr.ResolveParams(given)
+	if err != nil {
+		return err
+	}
+
+	withParams := make(map[string]any, len(data)+1)
+	for k, v := range data {
+		withParams[k] = v
+	}
+	withParams["params"] = params
+	req := sr.Request
+	req.Type = rules.ActionHTTP
+	return r.runHTTP(ctx, req, withParams, lk, res)
+}
+
+func nameOr(name, fallback string) string {
+	if name != "" {
+		return name
+	}
+	return fallback
+}
+
+// ParamSecretRefs rejects saved-request parameters that use secrets, so
+// rules can be checked at save time as well as at run time.
+func ParamSecretRefs(actions []rules.Action) error {
+	for i, a := range actions {
+		if a.Type != rules.ActionRequest {
+			continue
+		}
+		for k, v := range a.Params {
+			names, err := SecretNames(v)
+			if err != nil {
+				return fmt.Errorf("action %d, parameter %s: %w", i+1, k, err)
+			}
+			if len(names) > 0 {
+				return fmt.Errorf("action %d, parameter %s: secrets can't be used in parameters; put the secret in the saved request itself", i+1, k)
+			}
+		}
+	}
+	return nil
 }

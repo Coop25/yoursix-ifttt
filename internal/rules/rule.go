@@ -77,6 +77,8 @@ const (
 	ActionHTTP    = "http"
 	ActionDelay   = "delay"
 	ActionDiscord = "discord"
+	// ActionRequest runs a SavedRequest by ID with the given parameters.
+	ActionRequest = "request"
 )
 
 // Action is a single step. Only the fields relevant to Type are used.
@@ -105,6 +107,11 @@ type Action struct {
 	// discord (webhook URL may also come from Y6IFTTT_DISCORD_WEBHOOK_URL)
 	WebhookURL string `json:"webhookUrl,omitempty"` // templated
 	Message    string `json:"message,omitempty"`    // templated
+
+	// request: a SavedRequest plus values for its parameters. Values are
+	// templated with event data but may not use secrets.
+	RequestID int64             `json:"requestId,omitempty"`
+	Params    map[string]string `json:"params,omitempty"`
 }
 
 // Validate normalises the rule in place and reports the first problem.
@@ -180,6 +187,15 @@ func (a *Action) validate() error {
 	case ActionDiscord:
 		if strings.TrimSpace(a.Message) == "" {
 			return errors.New("message is required")
+		}
+	case ActionRequest:
+		if a.RequestID <= 0 {
+			return errors.New("choose a saved request")
+		}
+		for k := range a.Params {
+			if !validParam.MatchString(k) {
+				return fmt.Errorf("invalid parameter name %q", k)
+			}
 		}
 	default:
 		return fmt.Errorf("unknown type %q", a.Type)

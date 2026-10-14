@@ -58,6 +58,7 @@ A rule has an **If** part, a list of **Then** actions, and an optional cooldown.
 | `http` | Any method, URL, headers and body. Auth can be none, `basic`, or `digest` (Axis VAPIX default). Optional self-signed TLS, custom expected status codes, and a timeout. |
 | `delay` | Waits N ms between steps. |
 | `discord` | Posts a message to a Discord webhook. |
+| `request` | Runs a **saved request** (see below) with values for its parameters. |
 
 By default a failing action stops the rule. Set `continueOnError` on an action to keep going after it fails.
 
@@ -71,6 +72,18 @@ URL, body, header values, password and message are Go templates:
 ```
 
 Rules can be edited in the form editor or as raw JSON (toggle in the editor). See [testdata/rules/motion-to-mock-camera.json](testdata/rules/motion-to-mock-camera.json) for an example.
+
+### Saved requests
+
+The **Requests** tab holds reusable HTTP requests, so the same camera call doesn't have to be copied into every rule. Each one has a name, an HTTP request (method, URL, auth, headers, body, timeout), and optional **parameters**. Its templates use parameters as `{{ .params.NAME }}`, alongside the usual event data.
+
+Rules use one with the **+ Saved request** action. Pick the request, then fill in its parameters; values can use event data, e.g. `preset = {{ .data.deviceName }}-view`. A parameter with a default is optional, and one without a default is required. Editing a saved request updates every rule that uses it. A request can't be deleted while rules still use it. Each request has its own **Test** button, which asks for parameter values first.
+
+**Saved requests and secrets.** Parameters can change where a request goes, for example a `host` parameter in the URL. So:
+
+- A saved request that uses secrets runs with the secrets of the admin who last saved it, and **only that admin's rules can use it**. This is checked when a rule is saved and again on every run.
+- Saved requests without secrets can be used by anyone.
+- Parameter values can't use `{{ secret }}`. Put the secret in the saved request itself.
 
 ### Secrets
 

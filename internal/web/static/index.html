@@ -13,6 +13,7 @@
     <div class="brand">YourSix <span>IFTTT</span></div>
     <nav id="tabs" class="tabs hidden">
       <button data-tab="rules" class="active">Rules</button>
+      <button data-tab="requests">Requests</button>
       <button data-tab="events">Events</button>
       <button data-tab="secrets" class="admin-only">Secrets</button>
       <button data-tab="setup">Setup</button>
@@ -34,6 +35,15 @@
         <button id="new-rule" class="btn primary admin-only">New rule</button>
       </div>
       <div id="rules-list" class="cards"></div>
+    </section>
+
+    <section id="view-requests" class="view hidden">
+      <div class="toolbar">
+        <h2>Saved requests</h2>
+        <button id="new-request" class="btn primary admin-only">New request</button>
+      </div>
+      <p class="muted">Define an HTTP request once and use it from any rule with the <strong>+ Saved request</strong> action. Editing it here updates every rule that uses it. Parameters (<code>{{ .params.NAME }}</code>) let each rule fill in its own values, such as a preset name.</p>
+      <div id="requests-list" class="cards"></div>
     </section>
 
     <section id="view-events" class="view hidden">
@@ -128,6 +138,7 @@
           <button type="button" class="btn small" data-add-action="http">+ HTTP request</button>
           <button type="button" class="btn small" data-add-action="delay">+ Delay</button>
           <button type="button" class="btn small" data-add-action="discord">+ Discord message</button>
+          <button type="button" class="btn small" data-add-action="request">+ Saved request</button>
         </div>
         <details class="help">
           <summary>Template help</summary>
@@ -137,6 +148,7 @@
             <li><code>{{ .event.eventCode }}</code>, <code>{{ .event.eventTopic }}</code>, <code>{{ .event.key }}</code>, <code>{{ .rule }}</code></li>
             <li><code>{{ json .data.deviceName }}</code> – JSON-quoted value for JSON bodies</li>
             <li><code>{{ urlquery .data.deviceName }}</code> – URL-escaped value</li>
+            <li><code>{{ .params.preset }}</code> – inside a saved request: a value the rule fills in</li>
             <li><code>{{ secret "FRONT_CAM_PASS" }}</code> – one of <em>your</em> secrets (Secrets tab), or an operator env secret <code>Y6IFTTT_SECRET_FRONT_CAM_PASS</code>. The name must be a quoted literal.</li>
           </ul>
         </details>
@@ -152,9 +164,40 @@
     </form>
   </dialog>
 
+  <dialog id="req-editor">
+    <form method="dialog" id="req-form">
+      <header class="dlg-head"><h2 id="req-title">Saved request</h2></header>
+      <div class="grid2">
+        <label>Name <input id="r-name" required maxlength="120" placeholder="e.g. Front cam: go to PTZ preset"></label>
+        <label>Description <input id="r-desc" maxlength="300" placeholder="optional"></label>
+      </div>
+
+      <h3>Parameters <span class="muted small">(use them as <code>{{ .params.NAME }}</code>; leave Default empty to make one required)</span></h3>
+      <div id="r-params"></div>
+      <button type="button" class="btn small" id="r-add-param">+ Parameter</button>
+
+      <h3>Request</h3>
+      <div id="r-request"></div>
+      <details class="help">
+        <summary>Template help</summary>
+        <p>URL, body, header values and password are Go templates. They see the triggering event and the parameters:</p>
+        <ul>
+          <li><code>{{ .params.preset }}</code>, <code>{{ urlquery .params.preset }}</code> – a parameter value</li>
+          <li><code>{{ .data.deviceName }}</code>, <code>{{ .event.eventCode }}</code> – event data, as in rules</li>
+          <li><code>{{ secret "CAMERA_PASS" }}</code> – one of your secrets. A request that uses secrets can only be used by your own rules, because parameters could otherwise redirect it.</li>
+        </ul>
+      </details>
+      <p id="req-error" class="error"></p>
+      <footer class="dlg-foot">
+        <button type="button" class="btn" id="req-cancel">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
   <dialog id="discard-dlg" class="confirm" aria-labelledby="discard-title">
     <h2 id="discard-title">Discard unsaved changes?</h2>
-    <p class="muted">You've changed this rule since opening it. If you close the editor now, those changes will be lost.</p>
+    <p class="muted">You've made changes since opening this editor. If you close it now, they'll be lost.</p>
     <footer class="dlg-foot">
       <button type="button" class="btn" id="discard-keep" autofocus>Keep editing</button>
       <button type="button" class="btn danger" id="discard-yes">Discard changes</button>

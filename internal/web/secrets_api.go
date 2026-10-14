@@ -19,11 +19,19 @@ func (s *Server) ruleEditor(w http.ResponseWriter, r *http.Request, rule rules.R
 		writeError(w, http.StatusBadRequest, err.Error())
 		return store.Editor{}, false
 	}
+	if err := s.checkRequestActions(r, u.ID, rule.Actions); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return store.Editor{}, false
+	}
+	return editorFor(u), true
+}
+
+func editorFor(u User) store.Editor {
 	name := u.DisplayName
 	if name == "" {
 		name = u.Username
 	}
-	return store.Editor{ID: u.ID, Name: name}, true
+	return store.Editor{ID: u.ID, Name: name}
 }
 
 // Secrets are scoped to the signed-in admin: every handler uses the session's

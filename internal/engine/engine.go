@@ -39,6 +39,10 @@ type Engine struct {
 }
 
 func New(s *store.Store, r *actions.Runner, sm *secrets.Manager, log *slog.Logger) *Engine {
+	// Saved requests ("request" actions) come from the same store as the rules.
+	if r.Requests == nil {
+		r.Requests = s
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
 		store:        s,
@@ -125,8 +129,11 @@ func (e *Engine) StartTestRun(ctx context.Context, r rules.Rule, ev yoursix.Even
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
-		steps, ok := e.runner.RunWithProgress(e.ctx, r.Actions, ev.TemplateData(r.Name),
-			e.secrets.LookupFor(e.ctx, r.UpdatedBy), e.progress(runID))
+		steps, ok := e.runner.RunWith(e.ctx, r.Actions, ev.TemplateData(r.Name), actions.RunOptions{
+			Secrets: e.secrets.LookupFor(e.ctx, r.UpdatedBy),
+			Owner:   r.UpdatedBy,
+			OnStep:  e.progress(runID),
+		})
 		e.finish(runID, r, ev, steps, ok)
 	}()
 	return store.RunView{ID: runID, EventRow: row, RuleID: r.ID, RuleName: r.Name, Status: store.RunRunning, Steps: []actions.StepResult{}}, nil
@@ -229,8 +236,11 @@ func (e *Engine) startRun(row int64, r rules.Rule, ev yoursix.Event) {
 		}
 		defer func() { <-e.sem }()
 
-		steps, ok := e.runner.RunWithProgress(e.ctx, r.Actions, ev.TemplateData(r.Name),
-			e.secrets.LookupFor(e.ctx, r.UpdatedBy), e.progress(runID))
+		steps, ok := e.runner.RunWith(e.ctx, r.Actions, ev.TemplateData(r.Name), actions.RunOptions{
+			Secrets: e.secrets.LookupFor(e.ctx, r.UpdatedBy),
+			Owner:   r.UpdatedBy,
+			OnStep:  e.progress(runID),
+		})
 		e.finish(runID, r, ev, steps, ok)
 	}()
 }

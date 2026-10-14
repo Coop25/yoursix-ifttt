@@ -60,6 +60,18 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS runs_event_row ON runs(event_row);
 
+CREATE TABLE IF NOT EXISTS requests (
+	id              INTEGER PRIMARY KEY AUTOINCREMENT,
+	name            TEXT NOT NULL,
+	description     TEXT NOT NULL DEFAULT '',
+	params_json     TEXT NOT NULL DEFAULT '[]',
+	request_json    TEXT NOT NULL,
+	updated_by      TEXT NOT NULL DEFAULT '',
+	updated_by_name TEXT NOT NULL DEFAULT '',
+	created_at      TEXT NOT NULL,
+	updated_at      TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS secrets (
 	owner_id    TEXT NOT NULL,
 	owner_name  TEXT NOT NULL DEFAULT '',
