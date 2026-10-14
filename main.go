@@ -105,9 +105,10 @@ func serve(log *slog.Logger) error {
 	sm := secrets.NewManager(box, st)
 
 	eng := engine.New(st, actions.NewRunner(cfg.DiscordWebhook, version), sm, log)
+	webSrv := web.New(cfg, st, eng, sm, log, version)
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           web.New(cfg, st, eng, sm, log, version).Handler(),
+		Handler:           webSrv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		// Every handler answers quickly; rule runs (including tests) happen in
@@ -115,6 +116,9 @@ func serve(log *slog.Logger) error {
 		WriteTimeout: time.Minute,
 		IdleTimeout:  2 * time.Minute,
 	}
+
+	// Live-update streams never go idle, so end them when shutdown starts.
+	srv.RegisterOnShutdown(webSrv.Close)
 
 	go prune(ctx, st, cfg.EventRetention, log)
 

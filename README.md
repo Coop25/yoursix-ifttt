@@ -3,7 +3,7 @@
 A small Go service that receives [YourSix event webhooks](https://docs.yoursix.com/reference/events/intro) over a Cloudflare Tunnel and runs programmable actions on your local network. For example, a motion event on one camera can pulse an output on another camera, move a PTZ to a preset, call your home automation, or post to Discord.
 
 - **Public:** `POST /hook/<token>` (the webhook receiver) and `GET /healthz`.
-- **Behind Discord login:** the web UI for editing rules, viewing the event and run history, testing rules, and simulating events.
+- **Behind Discord login:** the web UI for editing rules, a live event and run log (pushed from the server as things happen, no polling), testing rules, and simulating events.
 - **Storage:** SQLite in a Docker volume. The image is a single static binary on distroless.
 
 <picture>
@@ -13,7 +13,7 @@ A small Go service that receives [YourSix event webhooks](https://docs.yoursix.c
 
 ## Screenshots
 
-**Event log.** Every webhook is recorded with the rules it triggered. Expand one to see each action's result.
+**Event log.** Every webhook is recorded with the rules it triggered, and new events and rule results appear live. Expand one to see each action's result.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/events-dark.png">

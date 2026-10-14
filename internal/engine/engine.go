@@ -31,6 +31,11 @@ type Engine struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// OnChange, if set, is told whenever an event or one of its runs changes
+	// (received, run started, step finished, run finished), so the UI can be
+	// updated live. Set it before the engine handles events.
+	OnChange func(eventRow int64)
+
 	// mu guards the per-rule scheduling state below.
 	mu           sync.Mutex
 	lastFired    map[int64]time.Time // when the last run started
@@ -108,6 +113,7 @@ func (e *Engine) Dispatch(ctx context.Context, ev yoursix.Event, raw []byte, sou
 		e.startRun(row, r, ev)
 	}
 	e.log.Info("event received", "event", ev.Key(), "eventId", ev.EventID, "matched", len(res.Matched), "test", test)
+	e.changed(row)
 	return res, nil
 }
 
@@ -125,6 +131,7 @@ func (e *Engine) StartTestRun(ctx context.Context, r rules.Rule, ev yoursix.Even
 	if err != nil {
 		return store.RunView{}, err
 	}
+	e.changed(row)
 
 	e.wg.Add(1)
 	go func() {
@@ -132,24 +139,25 @@ func (e *Engine) StartTestRun(ctx context.Context, r rules.Rule, ev yoursix.Even
 		steps, ok := e.runner.RunWith(e.ctx, r.Actions, ev.TemplateData(r.Name), actions.RunOptions{
 			Secrets: e.secrets.LookupFor(e.ctx, r.UpdatedBy),
 			Owner:   r.UpdatedBy,
-			OnStep:  e.progress(runID),
+			OnStep:  e.progress(row, runID),
 		})
-		e.finish(runID, r, ev, steps, ok)
+		e.finish(row, runID, r, ev, steps, ok)
 	}()
 	return store.RunView{ID: runID, EventRow: row, RuleID: r.ID, RuleName: r.Name, Status: store.RunRunning, Steps: []actions.StepResult{}}, nil
 }
 
 // progress saves a run's completed steps as it goes, so the UI can show
 // long runs live.
-func (e *Engine) progress(runID int64) func([]actions.StepResult) {
+func (e *Engine) progress(row, runID int64) func([]actions.StepResult) {
 	return func(steps []actions.StepResult) {
 		if err := e.store.UpdateRunSteps(context.Background(), runID, steps); err != nil {
 			e.log.Error("save run progress", "run", runID, "err", err)
 		}
+		e.changed(row)
 	}
 }
 
-func (e *Engine) finish(runID int64, r rules.Rule, ev yoursix.Event, steps []actions.StepResult, ok bool) {
+func (e *Engine) finish(row, runID int64, r rules.Rule, ev yoursix.Event, steps []actions.StepResult, ok bool) {
 	status := store.RunOK
 	if !ok {
 		status = store.RunFailed
@@ -158,6 +166,7 @@ func (e *Engine) finish(runID int64, r rules.Rule, ev yoursix.Event, steps []act
 		e.log.Error("finish run", "rule", r.Name, "err", err)
 	}
 	e.log.Info("rule ran", "rule", r.Name, "status", status, "event", ev.Key())
+	e.changed(row)
 }
 
 // claim decides whether r may run now. It returns "" and reserves the run
@@ -232,6 +241,7 @@ func (e *Engine) startRun(row int64, r rules.Rule, ev yoursix.Event) {
 		case e.sem <- struct{}{}:
 		case <-e.ctx.Done():
 			_ = e.store.FinishRun(context.Background(), runID, store.RunFailed, nil)
+			e.changed(row)
 			return
 		}
 		defer func() { <-e.sem }()
@@ -239,10 +249,16 @@ func (e *Engine) startRun(row int64, r rules.Rule, ev yoursix.Event) {
 		steps, ok := e.runner.RunWith(e.ctx, r.Actions, ev.TemplateData(r.Name), actions.RunOptions{
 			Secrets: e.secrets.LookupFor(e.ctx, r.UpdatedBy),
 			Owner:   r.UpdatedBy,
-			OnStep:  e.progress(runID),
+			OnStep:  e.progress(row, runID),
 		})
-		e.finish(runID, r, ev, steps, ok)
+		e.finish(row, runID, r, ev, steps, ok)
 	}()
+}
+
+func (e *Engine) changed(row int64) {
+	if e.OnChange != nil && row > 0 {
+		e.OnChange(row)
+	}
 }
 
 // Shutdown cancels in-flight runs and waits for them, up to ctx's deadline.

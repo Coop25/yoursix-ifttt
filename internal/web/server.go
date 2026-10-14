@@ -25,12 +25,13 @@ type Server struct {
 	secrets *secrets.Manager
 	auth    *auth
 	sources *sourceVerifier
+	live    *liveHub
 	log     *slog.Logger
 	version string
 }
 
 func New(cfg config.Config, st *store.Store, eng *engine.Engine, sm *secrets.Manager, log *slog.Logger, version string) *Server {
-	return &Server{
+	s := &Server{
 		cfg:     cfg,
 		store:   st,
 		engine:  eng,
@@ -40,7 +41,14 @@ func New(cfg config.Config, st *store.Store, eng *engine.Engine, sm *secrets.Man
 		log:     log,
 		version: version,
 	}
+	s.live = newLiveHub(st, log)
+	eng.OnChange = s.live.Notify
+	return s
 }
+
+// Close ends long-lived live-update streams. Register it with
+// http.Server.RegisterOnShutdown so shutdown isn't held up by them.
+func (s *Server) Close() { s.live.Close() }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -68,6 +76,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/rules/{id}/test", admin(s.handleTestRule))
 	mux.Handle("GET /api/runs/{id}", view(s.handleGetRun))
 	mux.Handle("GET /api/events", view(s.handleListEvents))
+	mux.Handle("GET /api/events/stream", view(s.handleEventStream))
 	mux.Handle("GET /api/events/{id}", view(s.handleGetEvent))
 	mux.Handle("POST /api/events/{id}/replay", admin(s.handleReplayEvent))
 	mux.Handle("POST /api/simulate", admin(s.handleSimulate))

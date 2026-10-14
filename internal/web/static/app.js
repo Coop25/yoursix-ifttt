@@ -61,7 +61,7 @@ const ago = (s) => {
 };
 
 // ---------- state ----------
-const state = { me: null, catalog: null, rules: [], events: [], editing: null, eventsTimer: null };
+const state = { me: null, catalog: null, rules: [], events: [], editing: null, live: null };
 const isAdmin = () => state.me && state.me.role === "admin";
 
 // ---------- boot ----------
@@ -93,7 +93,6 @@ async function boot() {
   $("#new-rule").addEventListener("click", () => openEditor(null));
   $("#events-refresh").addEventListener("click", () => loadEvents());
   $("#events-more").addEventListener("click", () => loadEvents(true));
-  $("#events-auto").addEventListener("change", scheduleEvents);
   wireEditor();
   wireSetup();
   wireSecrets();
@@ -142,10 +141,13 @@ function showTab(tab) {
   if (location.hash !== `#${tab}`) history.replaceState(null, "", `#${tab}`);
   $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $$(".view").forEach((v) => v.classList.toggle("hidden", v.id !== `view-${tab}`));
-  clearTimeout(state.eventsTimer);
+  if (tab !== "events") stopLive();
   if (tab === "rules") loadRules();
   if (tab === "requests") loadRequests();
-  if (tab === "events") loadEvents();
+  if (tab === "events") {
+    startLive();
+    loadEvents();
+  }
   if (tab === "setup") loadSetup();
   if (tab === "secrets") loadSecrets();
 }
@@ -578,54 +580,148 @@ function readVisual() {
 }
 
 // ---------- events ----------
+// The list loads once, then stays current through the server's live stream
+// (GET /api/events/stream): each pushed event replaces its own row, so
+// expanded rows stay open and nothing flickers.
+const emptyEventsRow = (text) => h("tr", {}, h("td.empty", { colspan: 4 }, text));
+
 async function loadEvents(older) {
+  const body = $("#events-body");
+  if (!older && !state.events.length) body.replaceChildren(emptyEventsRow("Loading events…"));
   const before = older && state.events.length ? state.events[state.events.length - 1].id : 0;
-  const page = await api("GET", `/api/events?limit=50${before ? `&before=${before}` : ""}`);
-  state.events = older ? state.events.concat(page) : page;
-  const open = new Set($$("#events-body tr.detail").map((r) => r.dataset.id));
-  $("#events-body").replaceChildren(...(state.events.length
-    ? state.events.flatMap((e) => eventRows(e, open.has(String(e.id))))
-    : [h("tr", {}, h("td.empty", { colspan: 4 }, "No events yet. Point a YourSix webhook at this service or simulate one from Setup."))]));
-  $("#events-more").classList.toggle("hidden", page.length < 50);
-  scheduleEvents();
-}
-
-function scheduleEvents() {
-  clearTimeout(state.eventsTimer);
-  if ($("#events-auto").checked && !$("#view-events").classList.contains("hidden")) {
-    state.eventsTimer = setTimeout(() => loadEvents(), 5000);
+  let page;
+  try {
+    page = await api("GET", `/api/events?limit=50${before ? `&before=${before}` : ""}`);
+  } catch (e) {
+    if (!state.events.length) body.replaceChildren(emptyEventsRow(`Couldn't load events: ${e.message}`));
+    return;
   }
+  if (older) {
+    state.events = state.events.concat(page.filter((e) => !state.events.some((x) => x.id === e.id)));
+  } else {
+    // Keep anything pushed while this page was loading.
+    const pushed = state.events.filter((e) => !page.some((x) => x.id === e.id) && (!page.length || e.id > page[0].id));
+    state.events = pushed.concat(page);
+  }
+  renderEvents();
+  $("#events-more").classList.toggle("hidden", page.length < 50);
 }
 
-function eventRows(e, expanded) {
+// renderEvents redraws the whole table, reusing open detail rows as they are.
+function renderEvents() {
+  const body = $("#events-body");
+  const details = new Map($$("#events-body tr.detail").map((r) => [r.dataset.id, r]));
+  if (!state.events.length) {
+    body.replaceChildren(emptyEventsRow("No events yet. Point a YourSix webhook at this service or simulate one from Setup."));
+    return;
+  }
+  body.replaceChildren(...state.events.flatMap((e) => {
+    const d = details.get(String(e.id));
+    return d ? [eventRow(e), d] : [eventRow(e)];
+  }));
+}
+
+function eventRow(e) {
   const tr = h("tr.ev", {},
-    h("td", { title: fmtTime(e.receivedAt) }, ago(e.receivedAt)),
+    h("td", { title: fmtTime(e.receivedAt), "data-time": e.receivedAt }, ago(e.receivedAt)),
     h("td", {}, h("code", {}, `${e.topic}:${e.code}`), " ", h("span.muted", {}, e.description), e.test ? h("span.badge.test", {}, "test") : null),
     h("td.muted.small", {}, e.sourceIp),
     h("td", {}, e.runs.length ? e.runs.map((r) => h(`span.badge.${r.status}`, { title: r.status }, r.ruleName)) : h("span.muted.small", {}, "no match")),
   );
-  tr.addEventListener("click", () => toggleEvent(tr, e));
-  const rows = [tr];
-  if (expanded) {
-    const d = h("tr.detail", {}, h("td", { colspan: 4 }, h("p.muted", {}, "Loading…")));
-    d.dataset.id = e.id;
-    rows.push(d);
-    fillEventDetail(d, e.id);
-  }
-  return rows;
+  tr.dataset.id = e.id;
+  tr.addEventListener("click", () => toggleEvent(tr, e.id));
+  return tr;
 }
 
-function toggleEvent(tr, e) {
+// upsertEvent applies one pushed event: replace its row in place, or add it
+// at the top if it's new. Older events outside the loaded page are ignored.
+function upsertEvent(ev) {
+  const body = $("#events-body");
+  const i = state.events.findIndex((e) => e.id === ev.id);
+  if (i >= 0) {
+    state.events[i] = ev;
+    const old = $(`#events-body tr.ev[data-id="${ev.id}"]`);
+    if (old) old.replaceWith(eventRow(ev));
+    const detail = $(`#events-body tr.detail[data-id="${ev.id}"]`);
+    if (detail) fillEventDetail(detail, ev.id); // quietly, no "Loading…"
+    return;
+  }
+  if (state.events.length && ev.id < state.events[0].id) return;
+  state.events.unshift(ev);
+  if (state.events.length === 1) {
+    renderEvents();
+  } else {
+    body.prepend(eventRow(ev));
+  }
+  const row = $(`#events-body tr.ev[data-id="${ev.id}"]`);
+  if (row) row.classList.add("fresh");
+}
+
+function toggleEvent(tr, id) {
   const next = tr.nextElementSibling;
   if (next && next.classList.contains("detail")) {
     next.remove();
     return;
   }
   const d = h("tr.detail", {}, h("td", { colspan: 4 }, h("p.muted", {}, "Loading…")));
-  d.dataset.id = e.id;
+  d.dataset.id = id;
   tr.after(d);
-  fillEventDetail(d, e.id);
+  fillEventDetail(d, id);
 }
+
+// Keep the "x ago" column current without reloading anything.
+setInterval(() => {
+  for (const td of $$("#events-body td[data-time]")) td.textContent = ago(td.dataset.time);
+}, 15000);
+
+// ---------- live connection ----------
+function setLiveStatus(status) {
+  const pill = $("#events-live");
+  pill.dataset.status = status;
+  $(".label", pill).textContent = { live: "Live", connecting: "Connecting…", reconnecting: "Reconnecting…", offline: "Offline" }[status] || status;
+  pill.title = status === "live" ? "New events and rule results appear here as they happen." : "Not receiving live updates right now; use Refresh.";
+}
+
+function startLive() {
+  if (state.live) return;
+  const es = new EventSource("/api/events/stream");
+  state.live = es;
+  setLiveStatus("connecting");
+  let connectedBefore = false;
+  es.addEventListener("open", () => {
+    setLiveStatus("live");
+    // After a reconnect, catch up on anything missed while disconnected.
+    if (connectedBefore) loadEvents();
+    connectedBefore = true;
+  });
+  es.addEventListener("event", (m) => {
+    try {
+      upsertEvent(JSON.parse(m.data));
+    } catch {
+      // ignore a malformed message
+    }
+  });
+  es.addEventListener("signedout", () => {
+    stopLive();
+    location.reload();
+  });
+  es.addEventListener("error", () => {
+    if (es.readyState === EventSource.CLOSED) {
+      // The browser gave up (e.g. the server refused); try again shortly.
+      setLiveStatus("offline");
+      if (state.live === es) state.live = null;
+      setTimeout(() => { if (!$("#view-events").classList.contains("hidden")) startLive(); }, 5000);
+    } else {
+      setLiveStatus("reconnecting");
+    }
+  });
+}
+
+function stopLive() {
+  if (state.live) state.live.close();
+  state.live = null;
+}
+
 
 const skipReason = {
   cooldown: "Event accepted but ignored: the rule is inside its cooldown window.",
@@ -643,8 +739,8 @@ async function fillEventDetail(row, id) {
       onclick: async (evt) => {
         evt.stopPropagation();
         const res = await api("POST", `/api/events/${id}/replay`);
+        // The replayed event arrives through the live stream.
         alert(`Replayed: ${res.matchedRules.length} rule(s) matched.`);
-        loadEvents();
       },
     }, "Replay through rules")) : null,
   );
