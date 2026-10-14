@@ -130,3 +130,6 @@ dialog > form, #result-dlg { padding: 16px 20px; }
 .btn.copy-failed { border-color: var(--bad); color: var(--bad); }
 .copyrow .btn { min-width: 96px; transition: color .15s, border-color .15s; }
 .offscreen { position: fixed; top: -1000px; left: 0; opacity: 0; }
+dialog.confirm { width: min(420px, 92vw); padding: 18px 20px; }
+dialog.confirm h2 { font-size: 16px; margin-bottom: 6px; }
+dialog.confirm p { margin: 0; }

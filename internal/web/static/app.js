@@ -245,7 +245,7 @@ function cleanRule(r) {
 }
 
 function wireEditor() {
-  $("#editor-cancel").addEventListener("click", () => $("#editor").close());
+  wireEditorClose();
   $("#add-filter").addEventListener("click", () => addFilterRow({ field: "deviceName", op: "equals", value: "" }));
   $$("[data-add-action]").forEach((b) => b.addEventListener("click", () => addActionBox(blankAction(b.dataset.addAction))));
   $("#editor-json-mode").addEventListener("change", (e) => {
@@ -295,6 +295,7 @@ function openEditor(rule) {
   $("#editor-json").classList.add("hidden");
   fillVisual(cleanRule(rule ? structuredClone(rule) : blankRule()));
   $("#editor").showModal();
+  state.editorSnapshot = editorState();
 }
 
 function fillVisual(r) {
@@ -671,4 +672,85 @@ function flashButton(btn, label, cls) {
     btn.textContent = btn.dataset.label;
     btn.classList.remove(cls);
   }, 1800);
+}
+
+// ---------- unsaved-changes guard ----------
+// Stable JSON (sorted keys) so key order never counts as a change.
+function canonical(v) {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
+  if (v && typeof v === "object") {
+    return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(v);
+}
+
+// The editor's current content in comparable form. Unparseable JSON is
+// compared as raw text, so any edit to it still counts as a change.
+function editorState() {
+  if ($("#editor-json-mode").checked) {
+    const text = $("#f-json").value;
+    try {
+      return canonical(cleanRule(JSON.parse(text)));
+    } catch {
+      return "raw:" + text;
+    }
+  }
+  return canonical(cleanRule(readVisual()));
+}
+
+const editorDirty = () => state.editorSnapshot !== undefined && editorState() !== state.editorSnapshot;
+
+// Close the editor, asking first when there's something to lose.
+function requestEditorClose() {
+  if (!editorDirty()) {
+    $("#editor").close();
+    return;
+  }
+  const confirmDlg = $("#discard-dlg");
+  if (!confirmDlg.open) confirmDlg.showModal();
+}
+
+function wireEditorClose() {
+  const dlg = $("#editor");
+  $("#editor-cancel").addEventListener("click", requestEditorClose);
+
+  // Backdrop clicks land on the <dialog> element itself, but so do clicks on
+  // its scrollbar, so test the point against the dialog's box. Require the
+  // press to start outside too, so drag-selecting text never closes it.
+  const outside = (e) => {
+    const r = dlg.getBoundingClientRect();
+    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+  };
+  let pressedOutside = false;
+  dlg.addEventListener("mousedown", (e) => { pressedOutside = e.target === dlg && outside(e); });
+  dlg.addEventListener("click", (e) => {
+    if (pressedOutside && e.target === dlg && outside(e)) requestEditorClose();
+    pressedOutside = false;
+  });
+  // Esc. Chrome doesn't always let a page cancel the dialog's own "cancel"
+  // (close-watcher rules), so take the key before the dialog acts on it.
+  // The cancel handler stays as a backstop for other close requests.
+  dlg.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || $("#discard-dlg").open) return;
+    e.preventDefault();
+    e.stopPropagation();
+    requestEditorClose();
+  });
+  dlg.addEventListener("cancel", (e) => {
+    e.preventDefault();
+    requestEditorClose();
+  });
+  dlg.addEventListener("close", () => { state.editorSnapshot = undefined; });
+
+  const confirmDlg = $("#discard-dlg");
+  $("#discard-keep").addEventListener("click", () => confirmDlg.close());
+  $("#discard-yes").addEventListener("click", () => {
+    confirmDlg.close();
+    dlg.close();
+  });
+  // Clicking the confirm dialog's own backdrop means "keep editing".
+  confirmDlg.addEventListener("click", (e) => {
+    const r = confirmDlg.getBoundingClientRect();
+    if (e.target === confirmDlg && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom)) confirmDlg.close();
+  });
 }

@@ -150,6 +150,15 @@
     </form>
   </dialog>
 
+  <dialog id="discard-dlg" class="confirm" aria-labelledby="discard-title">
+    <h2 id="discard-title">Discard unsaved changes?</h2>
+    <p class="muted">You've changed this rule since opening it. If you close the editor now, those changes will be lost.</p>
+    <footer class="dlg-foot">
+      <button type="button" class="btn" id="discard-keep" autofocus>Keep editing</button>
+      <button type="button" class="btn danger" id="discard-yes">Discard changes</button>
+    </footer>
+  </dialog>
+
   <dialog id="result-dlg">
     <h2 id="result-title">Result</h2>
     <div id="result-body"></div>
