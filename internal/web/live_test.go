@@ -171,7 +171,7 @@ func TestEventsCarryMatrixLink(t *testing.T) {
 	body, _ = json.Marshal(group)
 	postHook(t, ts.URL+"/hook/"+testToken, yoursix.UserAgent, body)
 
-	wantCam := "https://platform.yoursix.com/matrix?deviceIds=" + cam.EventData["deviceId"].(string) + "_1&timestamp=1791996197.084"
+	wantCam := "https://platform.yoursix.com/matrix?deviceIds=" + cam.EventData["deviceId"].(string) + "_0&timestamp=1791996197.084"
 	wantGroup := "https://platform.yoursix.com/matrix?alarmGroupId=" + group.EventData["groupId"].(string) + "&timestamp="
 
 	// Pushed live...

@@ -17,17 +17,16 @@ const DefaultPlatformURL = "https://platform.yoursix.com"
 //	/matrix?deviceIds=DEVICE-ID_SOURCE-ID&timestamp=SECONDS
 //	/matrix?alarmGroupId=GROUP-ID&timestamp=SECONDS
 //
-// The Matrix numbers a device's sources from 1, while events report a
-// 0-based videoSourceId, so source N in an event is "_N+1" in the link.
-// Without a videoSourceId the whole device is opened; without a device, the
-// event's alarm group. It returns "" when the event has neither.
+// The source suffix is the event's videoSourceId exactly as given. Without
+// one the whole device is opened; without a device, the event's alarm
+// group. It returns "" when the event has neither.
 func MatrixURL(base, deviceID, videoSourceID, groupID string, at time.Time) string {
 	q := url.Values{}
 	switch {
 	case deviceID != "":
 		ids := deviceID
-		if n, err := strconv.Atoi(strings.TrimSpace(videoSourceID)); err == nil && n >= 0 {
-			ids += "_" + strconv.Itoa(n+1)
+		if src := strings.TrimSpace(videoSourceID); src != "" {
+			ids += "_" + src
 		}
 		q.Set("deviceIds", ids)
 	case groupID != "":

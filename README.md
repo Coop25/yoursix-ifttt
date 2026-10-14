@@ -110,7 +110,7 @@ The **Secrets** tab (admins only) stores credentials such as camera passwords:
 
 Each event in the log has a **Matrix ↗** button, and its expanded view has **Open in Matrix ↗**. Both use YourSix's [Matrix deeplinks](https://docs.yoursix.com/reference/integration) to open the event's video, playing back from the moment it **occurred**:
 
-- Camera events with a `videoSourceId` open that stream: `deviceIds=<deviceId>_<videoSourceId + 1>` (events count sources from 0, the Matrix from 1).
+- Events with a `videoSourceId` open that stream: `deviceIds=<deviceId>_<videoSourceId>`, using the payload's value as-is.
 - Other device events open the whole device: `deviceIds=<deviceId>`.
 - Alarm group events open the group: `alarmGroupId=<groupId>`.
 
