@@ -381,9 +381,9 @@ function fillVisual(r) {
   renderCodes(r.trigger.codes);
 
   $("#f-filters").replaceChildren();
-  r.trigger.filters.forEach(addFilterRow);
+  r.trigger.filters.forEach((flt) => addFilterRow(flt));
   $("#f-actions").replaceChildren();
-  r.actions.forEach(addActionBox);
+  r.actions.forEach((a) => addActionBox(a));
 }
 
 const selectedTopics = () => $$("#f-topics input:checked").map((i) => i.value);
@@ -988,7 +988,7 @@ function openRequestEditor(sr) {
   $("#r-name").value = v.name;
   $("#r-desc").value = v.description || "";
   $("#r-params").replaceChildren();
-  (v.params || []).forEach(addParamRow);
+  (v.params || []).forEach((p) => addParamRow(p));
   $("#r-request").replaceChildren();
   addActionBox({ ...v.request, type: "http" }, $("#r-request"), { fixed: true });
   $("#req-editor").showModal();
