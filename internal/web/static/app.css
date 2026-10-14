@@ -126,3 +126,7 @@ dialog > form, #result-dlg { padding: 16px 20px; }
   table.events th:nth-child(3), table.events td:nth-child(3) { display: none; }
 }
 .narrow { width: 90px; }
+.btn.copied { border-color: var(--ok); color: var(--ok); }
+.btn.copy-failed { border-color: var(--bad); color: var(--bad); }
+.copyrow .btn { min-width: 96px; transition: color .15s, border-color .15s; }
+.offscreen { position: fixed; top: -1000px; left: 0; opacity: 0; }

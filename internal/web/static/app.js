@@ -536,7 +536,7 @@ function wireSetup() {
   $("#sim-code").addEventListener("change", loadSample);
   fillCodes();
   $("#sim-sample").addEventListener("click", loadSample);
-  $("#copy-webhook").addEventListener("click", () => navigator.clipboard.writeText($("#webhook-url").textContent));
+  $("#copy-webhook").addEventListener("click", (e) => copyText($("#webhook-url").textContent, e.currentTarget));
   $("#sim-send").addEventListener("click", async () => {
     const out = $("#sim-result");
     out.textContent = "Sending…";
@@ -627,4 +627,48 @@ async function loadSecrets() {
       }, "Delete"),
     ),
   )));
+}
+
+// ---------- clipboard ----------
+// navigator.clipboard only exists on HTTPS or localhost; over plain HTTP on
+// a LAN IP fall back to the legacy select-and-copy path.
+async function copyText(text, btn) {
+  let ok = false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } else {
+      const ta = h("textarea", { readonly: true, "aria-hidden": "true" });
+      ta.value = text;
+      ta.className = "offscreen";
+      document.body.append(ta);
+      ta.select();
+      ok = document.execCommand("copy");
+      ta.remove();
+    }
+  } catch {
+    ok = false;
+  }
+  flashButton(btn, ok ? "Copied ✓" : "Copy failed", ok ? "copied" : "copy-failed");
+  if (!ok) {
+    // Leave the text selected so it can be copied by hand.
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents($("#webhook-url"));
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+}
+
+function flashButton(btn, label, cls) {
+  clearTimeout(btn._flash);
+  btn.dataset.label ??= btn.textContent;
+  btn.textContent = label;
+  btn.classList.remove("copied", "copy-failed");
+  btn.classList.add(cls);
+  btn._flash = setTimeout(() => {
+    btn.textContent = btn.dataset.label;
+    btn.classList.remove(cls);
+  }, 1800);
 }
