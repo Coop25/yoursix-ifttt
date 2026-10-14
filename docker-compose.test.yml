@@ -1,0 +1,52 @@
+# Local test environment (task test:up). Builds from source, enables dev auth
+# (no Discord needed), and adds a mock "camera" that logs every request it gets.
+# No tunnel: never expose this stack publicly.
+name: yoursix-ifttt-test
+
+services:
+  app:
+    build:
+      context: .
+      args:
+        APP_VERSION: local-test
+    image: yoursix-ifttt:test
+    environment:
+      Y6IFTTT_DEV_AUTH: "true"
+      Y6IFTTT_COOKIE_SECURE: "false"
+      Y6IFTTT_PUBLIC_URL: http://localhost:${TEST_PORT:-8088}
+      Y6IFTTT_WEBHOOK_TOKEN: test-webhook-token-change-me-0123456789
+      Y6IFTTT_SECRET_CAMERA_PASS: pass
+      # Test-only key for the encrypted secrets manager. Never reuse it.
+      Y6IFTTT_SECRETS_KEY: 7465737420656e7669726f6e6d656e74206b65792020202020202020202020ff
+      Y6IFTTT_DISCORD_WEBHOOK_URL: ${Y6IFTTT_DISCORD_WEBHOOK_URL:-}
+      # Loaded only when the database has no rules yet.
+      Y6IFTTT_SEED_RULES_DIR: /seed
+    ports:
+      - "127.0.0.1:${TEST_PORT:-8088}:8080"
+    volumes:
+      - test_data:/app/data
+      - ./testdata/rules:/seed:ro
+      - ./testdata/events:/events:ro
+
+  # Stand-in for a LAN camera. In rules use http://mock-camera:9090/...
+  #   /digest/...  requires digest auth (root / pass), like Axis VAPIX
+  #   /basic/...   requires basic auth (root / pass)
+  #   anything else is open; GET /_requests lists what it received.
+  mock-camera:
+    image: yoursix-ifttt:test
+    command: ["mock-target"]
+    environment:
+      MOCK_ADDR: ":9090"
+      MOCK_USER: root
+      MOCK_PASS: pass
+    volumes:
+      - ./testdata/events:/events:ro
+    ports:
+      - "127.0.0.1:${MOCK_PORT:-9090}:9090"
+    healthcheck:
+      disable: true
+    depends_on:
+      - app
+
+volumes:
+  test_data:

@@ -1,0 +1,104 @@
+version: "3"
+
+dotenv:
+  - .env
+
+vars:
+  TEST_COMPOSE: docker compose -f docker-compose.test.yml
+  TEST_PORT: '{{.TEST_PORT | default "8088"}}'
+  TEST_TOKEN: test-webhook-token-change-me-0123456789
+
+tasks:
+  default:
+    cmds:
+      - task --list
+
+  # ---------- Go ----------
+  build:
+    desc: Build the binary into ./bin
+    cmds:
+      - go build -o bin/y6ifttt{{exeExt}} .
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - go test -race ./...
+
+  lint:
+    desc: go vet + gofmt check
+    cmds:
+      - go vet ./...
+      - gofmt -l .
+
+  run:
+    desc: Run locally with dev auth (no Discord) on :8080
+    env:
+      Y6IFTTT_DEV_AUTH: "true"
+      Y6IFTTT_COOKIE_SECURE: "false"
+      Y6IFTTT_WEBHOOK_TOKEN: '{{.Y6IFTTT_WEBHOOK_TOKEN | default .TEST_TOKEN}}'
+      Y6IFTTT_DATA_DIR: data-dev
+    cmds:
+      - go run .
+
+  # ---------- Test environment (Docker) ----------
+  test:up:
+    desc: Build and start the test environment (app + mock camera, dev auth, seeded example rule)
+    cmds:
+      - "{{.TEST_COMPOSE}} up -d --build --wait app"
+      - "{{.TEST_COMPOSE}} up -d mock-camera"
+      - 'echo "UI:            http://localhost:{{.TEST_PORT}}"'
+      - 'echo "Webhook:       http://localhost:{{.TEST_PORT}}/hook/{{.TEST_TOKEN}}"'
+      - 'echo "Mock camera:   http://localhost:9090/_requests"'
+      - 'echo "Fire an event: task test:fire   (or task test:fire EVENT=peripheral:input_activated)"'
+
+  test:fire:
+    desc: Send a YourSix-style webhook into the test environment (EVENT=topic:code or a file in testdata/events)
+    vars:
+      EVENT: '{{.EVENT | default "/events/device-vmd.json"}}'
+    cmds:
+      - "{{.TEST_COMPOSE}} run --rm --no-deps mock-camera fire http://app:8080/hook/{{.TEST_TOKEN}} {{.EVENT}}"
+
+  test:camera:
+    desc: Show the requests the mock camera has received
+    cmds:
+      - "{{.TEST_COMPOSE}} logs --no-log-prefix mock-camera"
+
+  test:logs:
+    desc: Follow test environment logs
+    cmds:
+      - "{{.TEST_COMPOSE}} logs -f"
+
+  test:down:
+    desc: Stop the test environment (keeps data)
+    cmds:
+      - "{{.TEST_COMPOSE}} down"
+
+  test:clean:
+    desc: Stop the test environment and delete its data volume
+    cmds:
+      - "{{.TEST_COMPOSE}} down -v"
+
+  # ---------- Production (Docker + Cloudflare Tunnel) ----------
+  docker:build:
+    desc: Build the production image locally
+    cmds:
+      - docker build --build-arg APP_VERSION=local -t yoursix-ifttt:local .
+
+  up:
+    desc: Pull and start the production stack (app + cloudflared) using .env
+    preconditions:
+      - sh: test -f .env
+        msg: "Copy .env.example to .env and fill it in first"
+    cmds:
+      - docker compose pull
+      - docker compose up -d
+
+  down:
+    desc: Stop the production stack
+    cmds:
+      - docker compose down
+
+  logs:
+    desc: Follow production logs
+    cmds:
+      - docker compose logs -f app

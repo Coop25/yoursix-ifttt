@@ -1,0 +1,23 @@
+{
+  "eventTopic": "peripheral",
+  "eventCode": "input_activated",
+  "eventDescription": "Input peripheral activated",
+  "eventOccurred": "2026-10-14T10:18:41+02:00",
+  "eventId": "REPLACED-AT-SEND-TIME",
+  "eventData": {
+    "peripheralId": "6630e036-ee13-11ef-bc15-b33a54d715fa",
+    "peripheralName": "Door contact",
+    "peripheralDescription": "Front door reed switch",
+    "deviceId": "0eeb5774-e88d-11ef-95f8-afbaa9403ab9",
+    "deviceName": "IO-01",
+    "deviceDescription": "I/O controller",
+    "siteId": "182140d9-d99c-4dc8-ae14-0071a01d7e98",
+    "siteName": "HQ",
+    "siteDescription": "Company headquarters in NYC",
+    "groupId": "cf84e116-ee61-4bd8-b078-3d2fadfcc9ac",
+    "groupName": "West entrance",
+    "groupDescription": "E1",
+    "groupActive": true,
+    "groupState": "schedule"
+  }
+}

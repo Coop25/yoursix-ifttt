@@ -1,0 +1,39 @@
+{
+  "name": "CAM-01 motion -> trigger mock camera output + preset",
+  "enabled": true,
+  "cooldownSeconds": 0,
+  "trigger": {
+    "topics": ["device"],
+    "codes": ["vmd", "aoa"],
+    "filters": [{ "field": "deviceName", "op": "equals", "value": "CAM-01" }]
+  },
+  "actions": [
+    {
+      "type": "http",
+      "name": "Pulse output port 1 (VAPIX, digest auth)",
+      "method": "GET",
+      "url": "http://mock-camera:9090/digest/axis-cgi/io/port.cgi?action=2:/",
+      "auth": "digest",
+      "username": "root",
+      "password": "{{ secret \"CAMERA_PASS\" }}"
+    },
+    { "type": "delay", "name": "Settle", "delayMillis": 500 },
+    {
+      "type": "http",
+      "name": "Move PTZ to preset 'Driveway'",
+      "method": "GET",
+      "url": "http://mock-camera:9090/digest/axis-cgi/com/ptz.cgi?gotoserverpresetname={{ urlquery \"Driveway\" }}&camera=1",
+      "auth": "digest",
+      "username": "root",
+      "password": "{{ secret \"CAMERA_PASS\" }}"
+    },
+    {
+      "type": "http",
+      "name": "Notify home automation",
+      "method": "POST",
+      "url": "http://mock-camera:9090/open/webhook",
+      "body": "{\"source\": {{ json .data.deviceName }}, \"event\": {{ json .event.key }}, \"site\": {{ json .data.siteName }}}",
+      "continueOnError": true
+    }
+  ]
+}

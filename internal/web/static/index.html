@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YourSix IFTTT</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">YourSix <span>IFTTT</span></div>
+    <nav id="tabs" class="tabs hidden">
+      <button data-tab="rules" class="active">Rules</button>
+      <button data-tab="events">Events</button>
+      <button data-tab="secrets" class="admin-only">Secrets</button>
+      <button data-tab="setup">Setup</button>
+    </nav>
+    <div id="me" class="me"></div>
+  </header>
+
+  <main>
+    <section id="login" class="panel center hidden">
+      <h1>Sign in</h1>
+      <p id="login-msg" class="muted">This service is restricted to approved Discord accounts.</p>
+      <a class="btn primary" href="/auth/login">Sign in with Discord</a>
+    </section>
+
+    <section id="view-rules" class="view hidden">
+      <div class="toolbar">
+        <h2>Rules</h2>
+        <button id="new-rule" class="btn primary admin-only">New rule</button>
+      </div>
+      <div id="rules-list" class="cards"></div>
+    </section>
+
+    <section id="view-events" class="view hidden">
+      <div class="toolbar">
+        <h2>Events</h2>
+        <label class="inline"><input type="checkbox" id="events-auto" checked> Auto-refresh</label>
+        <button id="events-refresh" class="btn">Refresh</button>
+      </div>
+      <table class="events">
+        <thead><tr><th>Received</th><th>Event</th><th>Source</th><th>Rules</th></tr></thead>
+        <tbody id="events-body"></tbody>
+      </table>
+      <button id="events-more" class="btn hidden">Load older</button>
+    </section>
+
+    <section id="view-secrets" class="view hidden">
+      <h2>Your secrets</h2>
+      <div id="secrets-disabled" class="panel hidden"></div>
+      <div id="secrets-panel" class="panel">
+        <p class="muted">Encrypted at rest and <strong>write-only</strong>: once saved, a value can't be viewed again. You can replace or delete it. Only you can see your secrets. Other admins can't see or use them.</p>
+        <p class="muted">Use one in a rule as <code>{{ secret "NAME" }}</code>. A rule runs with the secrets of whoever last saved it, so another admin who edits your rule can't borrow yours.</p>
+        <form id="secret-form" class="row" autocomplete="off">
+          <input id="secret-name" placeholder="NAME (e.g. FRONT_CAM_PASS)" maxlength="64" required pattern="[A-Za-z][A-Za-z0-9_]*">
+          <input id="secret-value" type="password" placeholder="value" required autocomplete="new-password">
+          <button class="btn primary" type="submit">Save</button>
+          <span id="secret-msg" class="muted"></span>
+        </form>
+        <table class="events">
+          <thead><tr><th>Name</th><th>Used by your rules</th><th>Updated</th><th></th></tr></thead>
+          <tbody id="secrets-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="view-setup" class="view hidden">
+      <h2>Webhook</h2>
+      <div class="panel admin-only">
+        <p>In YourSix, create an organization webhook pointing at this URL, then select it as a recipient in a notification rule.</p>
+        <div class="copyrow"><code id="webhook-url">…</code><button class="btn" id="copy-webhook">Copy</button></div>
+        <p id="webhook-checks" class="muted"></p>
+      </div>
+      <h2>Simulate an event</h2>
+      <div class="panel admin-only">
+        <p class="muted">Sends a payload through every enabled rule exactly like a real webhook (marked as a test in the log).</p>
+        <div class="row">
+          <label>Topic <select id="sim-topic"></select></label>
+          <label>Code <select id="sim-code"></select></label>
+          <button class="btn" id="sim-sample">Load sample</button>
+        </div>
+        <textarea id="sim-payload" rows="16" spellcheck="false"></textarea>
+        <div class="row"><button class="btn primary" id="sim-send">Send</button><span id="sim-result" class="muted"></span></div>
+      </div>
+      <p class="muted viewer-only">Viewers can't see the webhook URL or simulate events.</p>
+    </section>
+  </main>
+
+  <dialog id="editor">
+    <form method="dialog" id="editor-form">
+      <header class="dlg-head">
+        <h2 id="editor-title">Rule</h2>
+        <label class="inline"><input type="checkbox" id="editor-json-mode"> Edit as JSON</label>
+      </header>
+      <div id="editor-visual">
+        <label>Name <input id="f-name" required maxlength="120"></label>
+        <label class="inline"><input type="checkbox" id="f-enabled" checked> Enabled</label>
+
+        <h3>When to ignore events <span class="muted small">(ignored events are still logged)</span></h3>
+        <label class="inline"><input type="checkbox" id="f-skip-running"> Ignore new events while this rule is still running</label>
+        <div class="row">
+          <span>Run at most once every</span>
+          <input id="f-cooldown" type="number" min="0" class="narrow" aria-label="Cooldown seconds">
+          <span>seconds, counted from when the last run</span>
+          <select id="f-cooldown-from">
+            <option value="start">started</option>
+            <option value="finish">finished</option>
+          </select>
+          <span class="muted small">(0 = no limit)</span>
+        </div>
+
+        <h3>If… <span class="muted small">(empty = any)</span></h3>
+        <div class="field-label">Topics</div>
+        <div id="f-topics" class="chips"></div>
+        <div class="field-label">Event codes</div>
+        <div id="f-codes" class="chips scroll"></div>
+        <div class="field-label">Filters <span class="muted small">(all must match; fields are eventData keys like deviceName, or eventCode etc.)</span></div>
+        <div id="f-filters"></div>
+        <button type="button" class="btn small" id="add-filter">+ Filter</button>
+
+        <h3>Then…</h3>
+        <div id="f-actions"></div>
+        <div class="row">
+          <button type="button" class="btn small" data-add-action="http">+ HTTP request</button>
+          <button type="button" class="btn small" data-add-action="delay">+ Delay</button>
+          <button type="button" class="btn small" data-add-action="discord">+ Discord message</button>
+        </div>
+        <details class="help">
+          <summary>Template help</summary>
+          <p>URL, body, header values, password and messages are Go templates.</p>
+          <ul>
+            <li><code>{{ .data.deviceName }}</code>, <code>{{ .data.siteName }}</code>, <code>{{ .data.videoSourceId }}</code> – event data</li>
+            <li><code>{{ .event.eventCode }}</code>, <code>{{ .event.eventTopic }}</code>, <code>{{ .event.key }}</code>, <code>{{ .rule }}</code></li>
+            <li><code>{{ json .data.deviceName }}</code> – JSON-quoted value for JSON bodies</li>
+            <li><code>{{ urlquery .data.deviceName }}</code> – URL-escaped value</li>
+            <li><code>{{ secret "FRONT_CAM_PASS" }}</code> – one of <em>your</em> secrets (Secrets tab), or an operator env secret <code>Y6IFTTT_SECRET_FRONT_CAM_PASS</code>. The name must be a quoted literal.</li>
+          </ul>
+        </details>
+      </div>
+      <div id="editor-json" class="hidden">
+        <textarea id="f-json" rows="28" spellcheck="false"></textarea>
+      </div>
+      <p id="editor-error" class="error"></p>
+      <footer class="dlg-foot">
+        <button type="button" class="btn" id="editor-cancel">Cancel</button>
+        <button type="submit" class="btn primary" id="editor-save">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="result-dlg">
+    <h2 id="result-title">Result</h2>
+    <div id="result-body"></div>
+    <footer class="dlg-foot"><button class="btn" id="result-close">Close</button></footer>
+  </dialog>
+
+  <template id="tpl-filter">
+    <div class="filter-row">
+      <input class="ff-field" list="field-list" placeholder="deviceName">
+      <select class="ff-op">
+        <option value="equals">equals</option>
+        <option value="not_equals">not equals</option>
+        <option value="contains">contains</option>
+        <option value="starts_with">starts with</option>
+        <option value="regex">regex</option>
+        <option value="exists">exists</option>
+        <option value="not_exists">not exists</option>
+      </select>
+      <input class="ff-value" placeholder="value">
+      <button type="button" class="btn small danger ff-del">✕</button>
+    </div>
+  </template>
+  <datalist id="field-list"></datalist>
+</body>
+</html>

@@ -1,0 +1,8 @@
+.env
+bin/
+data/
+data-dev/
+*.exe
+*.db
+*.db-*
+.task/

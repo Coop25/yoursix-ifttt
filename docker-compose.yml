@@ -1,0 +1,30 @@
+# Production stack: the app plus a Cloudflare Tunnel. Nothing is published on
+# the host; the tunnel is the only way in. Configure via .env (see .env.example).
+services:
+  app:
+    image: ${Y6IFTTT_IMAGE:-ghcr.io/coop25/yoursix-ifttt:latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      Y6IFTTT_ADDR: ":8080"
+      Y6IFTTT_DATA_DIR: /app/data
+      # cloudflared forwards the real client IP in this header.
+      Y6IFTTT_CLIENT_IP_HEADER: ${Y6IFTTT_CLIENT_IP_HEADER:-CF-Connecting-IP}
+    volumes:
+      - app_data:/app/data
+    # Uncomment to also reach the UI directly on your LAN:
+    # ports:
+    #   - "8080:8080"
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in .env}
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  app_data:

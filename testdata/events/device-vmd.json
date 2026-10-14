@@ -1,0 +1,21 @@
+{
+  "eventTopic": "device",
+  "eventCode": "vmd",
+  "eventDescription": "Video motion detection",
+  "eventOccurred": "2026-10-14T10:18:41+02:00",
+  "eventId": "REPLACED-AT-SEND-TIME",
+  "eventData": {
+    "deviceId": "0eeb5774-e88d-11ef-95f8-afbaa9403ab9",
+    "deviceName": "CAM-01",
+    "deviceDescription": "Camera 01",
+    "siteId": "182140d9-d99c-4dc8-ae14-0071a01d7e98",
+    "siteName": "HQ",
+    "siteDescription": "Company headquarters in NYC",
+    "groupId": "cf84e116-ee61-4bd8-b078-3d2fadfcc9ac",
+    "groupName": "West entrance",
+    "groupDescription": "E1",
+    "groupActive": true,
+    "groupState": "schedule",
+    "videoSourceId": "0"
+  }
+}
