@@ -8,7 +8,7 @@ A small Go service that receives [YourSix event webhooks](https://docs.yoursix.c
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/rules-dark.png">
-  <img alt="Rules list showing triggers, actions, cooldown and one-at-a-time badges" src="docs/screenshots/rules-light.png">
+  <img alt="Rules list: green bars on enabled rules, a running rule showing Step 2 of 4 with a delay countdown, cooldown and one-at-a-time badges" src="docs/screenshots/rules-light.png">
 </picture>
 
 ## Screenshots
@@ -17,14 +17,21 @@ A small Go service that receives [YourSix event webhooks](https://docs.yoursix.c
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/events-dark.png">
-  <img alt="Event log with an expanded run showing each action's HTTP status and response" src="docs/screenshots/events-light.png">
+  <img alt="Live event log: a running rule expanded with its current step and countdown, finished steps, Open in Matrix and Replay buttons, and ok, busy, cooldown and no-match outcomes" src="docs/screenshots/events-light.png">
 </picture>
 
-**Rule editor.** Pick topics and event codes, add filters, and build the action list. You can also switch to raw JSON.
+**Rule editor.** Click a rule to open it. Pick topics and event codes, add filters, choose when to ignore events, and build the action list from HTTP requests, delays, Discord messages and saved requests. You can also switch to raw JSON.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/editor-dark.png">
-  <img alt="Rule editor with cooldown settings, event code pickers, filters and an HTTP action using digest auth" src="docs/screenshots/editor-light.png">
+  <img alt="Rule editor with ignore-while-running ticked, event code pickers, a filter, and actions: a saved request with its parameter, a delay and a Discord message" src="docs/screenshots/editor-light.png">
+</picture>
+
+**Saved requests.** Define a request once, with parameters, and reuse it from any rule.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/requests-dark.png">
+  <img alt="Saved requests: a PTZ preset call with digest auth and a required preset parameter, and a home-hub light call with a default entity, each listing the rules that use it" src="docs/screenshots/requests-light.png">
 </picture>
 
 **Secrets.** Encrypted, write-only, and private to each admin.
