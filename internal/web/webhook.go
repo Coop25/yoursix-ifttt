@@ -22,7 +22,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := s.clientIP(r)
-	if s.cfg.Webhook.RequireUserAgent && !strings.HasPrefix(r.UserAgent(), yoursix.UserAgent) {
+	if s.cfg.Webhook.RequireUserAgent && !yoursix.IsPlatformUserAgent(r.UserAgent()) {
 		s.log.Warn("webhook rejected: user agent", "ua", r.UserAgent(), "ip", ip)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return

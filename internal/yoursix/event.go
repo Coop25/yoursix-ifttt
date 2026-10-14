@@ -10,8 +10,22 @@ import (
 	"time"
 )
 
-// UserAgent is the User-Agent YourSix sends on every webhook request.
+// UserAgent is the product token YourSix puts in every webhook's User-Agent.
+// It isn't the whole header: real deliveries send e.g.
+// "postoffice/v2.21.0 y6-platform", so match it with IsPlatformUserAgent.
 const UserAgent = "y6-platform"
+
+// IsPlatformUserAgent reports whether ua contains the y6-platform product
+// token as a whole word (optionally with a /version), anywhere in the header.
+func IsPlatformUserAgent(ua string) bool {
+	for _, tok := range strings.Fields(ua) {
+		name, _, _ := strings.Cut(tok, "/")
+		if strings.EqualFold(name, UserAgent) {
+			return true
+		}
+	}
+	return false
+}
 
 // WebhookHost resolves (A record) to the IPv4 addresses webhooks are sent from.
 const WebhookHost = "webhook.cloud.yoursix.com"

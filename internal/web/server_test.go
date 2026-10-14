@@ -96,7 +96,8 @@ func TestWebhookEndToEnd(t *testing.T) {
 	if r := postHook(t, srv.URL+"/hook/"+testToken, yoursix.UserAgent, []byte(`{"nope":1}`)); r.StatusCode != http.StatusBadRequest {
 		t.Fatalf("bad payload: %d", r.StatusCode)
 	}
-	if r := postHook(t, srv.URL+"/hook/"+testToken, yoursix.UserAgent, body); r.StatusCode != http.StatusOK {
+	// The real header YourSix sends has the token last.
+	if r := postHook(t, srv.URL+"/hook/"+testToken, "postoffice/v2.21.0 y6-platform", body); r.StatusCode != http.StatusOK {
 		t.Fatalf("valid: %d", r.StatusCode)
 	}
 	// Redelivery of the same eventId must not fire again.
