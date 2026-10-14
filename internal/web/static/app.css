@@ -46,7 +46,6 @@ h3 { margin: 18px 0 6px; font-size: 15px; }
 .tabs button { background: none; border: 0; padding: 6px 12px; border-radius: 6px; color: var(--muted); cursor: pointer; font: inherit; }
 .tabs button.active { background: var(--chip); color: var(--text); font-weight: 600; }
 .me { display: flex; align-items: center; gap: 8px; margin-left: auto; }
-.me img { width: 26px; height: 26px; border-radius: 50%; }
 
 main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; }
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 20px; }
@@ -133,6 +132,25 @@ dialog > form, #result-dlg { padding: 16px 20px; }
 dialog.confirm { width: min(420px, 92vw); padding: 18px 20px; }
 dialog.confirm h2 { font-size: 16px; margin-bottom: 6px; }
 dialog.confirm p { margin: 0; }
-.reload-ui { white-space: nowrap; }
-.reload-ui.spinning { opacity: .6; }
-@media (max-width: 640px) { .reload-ui span { display: none; } }
+/* Discord avatar doubles as the "Reload UI" button. */
+.avatar-btn {
+  position: relative; flex: none; width: 34px; height: 34px; padding: 0;
+  border-radius: 50%; border: 2px solid var(--border); overflow: hidden;
+  background: var(--chip); color: var(--text); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: border-color .15s;
+}
+.avatar-btn img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.avatar-fallback { font-weight: 600; font-size: 14px; line-height: 1; }
+.avatar-btn::after {
+  content: "↻"; position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .55); color: #fff; font-size: 17px;
+  opacity: 0; transition: opacity .15s;
+}
+.avatar-btn:hover, .avatar-btn:focus-visible { border-color: var(--accent); }
+.avatar-btn:hover::after, .avatar-btn:focus-visible::after, .avatar-btn.spinning::after { opacity: 1; }
+.avatar-btn.spinning::after { animation: avatar-spin .8s linear infinite; }
+.avatar-btn:disabled { cursor: progress; }
+@keyframes avatar-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .avatar-btn.spinning::after { animation: none; } }

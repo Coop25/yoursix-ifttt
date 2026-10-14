@@ -94,11 +94,27 @@ async function boot() {
   showTab(location.hash.slice(1) || "rules");
 }
 
+// The Discord avatar is also the "Reload UI" button. Falls back to the
+// user's initial when there's no avatar or it fails to load.
+function renderAvatar(me) {
+  const btn = $("#reload-ui");
+  const name = me.displayName || me.username || "?";
+  const initial = () => h("span.avatar-fallback", { "aria-hidden": "true" }, [...name][0].toUpperCase());
+  btn.title = `Signed in as ${name}. Click to reload the UI (clears cached files)`;
+  if (!me.avatarUrl) {
+    btn.replaceChildren(initial());
+    return;
+  }
+  const img = h("img", { src: me.avatarUrl, alt: "", referrerpolicy: "no-referrer" });
+  img.addEventListener("error", () => btn.replaceChildren(initial()), { once: true });
+  btn.replaceChildren(img);
+}
+
 function renderMe() {
   const me = state.me;
   const box = $("#me");
+  renderAvatar(me);
   box.replaceChildren(
-    ...(me.avatarUrl ? [h("img", { src: me.avatarUrl, alt: "" })] : []),
     h("span", {}, me.displayName || me.username),
     h("span.badge", {}, me.role),
     h("button.btn.small", {
