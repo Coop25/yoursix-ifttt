@@ -2,6 +2,8 @@
 
 A small Go service that receives [YourSix event webhooks](https://docs.yoursix.com/reference/events/intro) over a Cloudflare Tunnel and runs programmable actions on your local network. For example, a motion event on one camera can pulse an output on another camera, move a PTZ to a preset, call your home automation, or post to Discord.
 
+**[Try the live demo ↗](https://coop25.github.io/yoursix-ifttt/)**: the real UI running entirely in your browser against a fake backend, with simulated YourSix events. Nothing talks to real devices.
+
 - **Public:** `POST /hook/<token>` (the webhook receiver) and `GET /healthz`.
 - **Behind Discord login:** the web UI for editing rules, a live event and run log (pushed from the server as things happen, no polling), testing rules, and simulating events.
 - **Storage:** SQLite in a Docker volume. The image is a single static binary on distroless.
@@ -157,6 +159,10 @@ task test:down                                   # stop (task test:clean also wi
 The UI's Setup tab can also simulate any event, and each rule has a **Test** button that runs its actions with a sample event.
 
 To run without Docker, use `task run` (dev auth on :8080). Use `task test` for the unit tests.
+
+## Demo
+
+The [live demo](https://coop25.github.io/yoursix-ifttt/) is the real UI from `internal/web/static`, with [`demo/mock-api.js`](demo/mock-api.js) standing in for the server: an in-browser imitation of the API, the rules engine (triggers, filters, cooldowns, ignore-while-running, saved requests) and the live event stream. It's published by the [Pages workflow](.github/workflows/pages.yml) whenever the UI or demo changes. Build it locally with `task demo` (output in `_site/`).
 
 ## Production
 

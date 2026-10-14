@@ -6,3 +6,4 @@ data-dev/
 *.db
 *.db-*
 .task/
+_site/

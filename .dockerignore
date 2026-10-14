@@ -9,3 +9,5 @@ data-dev
 *.db
 README.md
 docs
+demo
+_site

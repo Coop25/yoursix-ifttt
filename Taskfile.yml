@@ -78,6 +78,12 @@ tasks:
     cmds:
       - "{{.TEST_COMPOSE}} down -v"
 
+  # ---------- GitHub Pages demo ----------
+  demo:
+    desc: Build the browser-only demo (real UI + in-browser fake backend) into _site/
+    cmds:
+      - sh demo/build.sh
+
   # ---------- Production (Docker + Cloudflare Tunnel) ----------
   docker:build:
     desc: Build the production image locally
