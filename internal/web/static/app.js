@@ -195,7 +195,7 @@ function ruleCard(r) {
   const active = r.activeRuns || [];
   // Mark the rule's own action list with the first active run's position.
   const cur = active[0] && active[0].current;
-  const card = h("div.card" + (r.enabled ? "" : ".disabled") + (active.length ? ".is-running" : ""), {},
+  const card = h("div.card.rule-card" + (r.enabled ? ".enabled" : ".disabled") + (active.length ? ".is-running" : "") + (admin ? ".clickable" : ""), {},
     h("div.card-head", {},
       h("h3", {}, r.name),
       r.enabled ? h("span.badge.ok", {}, "enabled") : h("span.badge", {}, "disabled"),
@@ -215,17 +215,47 @@ function ruleCard(r) {
     h("ol.actions-list", {}, r.actions.map((a, i) => h("li" + (cur ? (i < cur.index ? ".step-done" : i === cur.index ? ".step-current" : "") : ""), {}, actionSummary(a)))),
   );
   card.dataset.ruleId = r.id;
+  if (admin) {
+    // Click anywhere on the card to edit, except its buttons and links, or
+    // when the click finished a text selection. Enter/Space for keyboards.
+    card.tabIndex = 0;
+    card.setAttribute("aria-label", `${r.name}: ${r.enabled ? "enabled" : "disabled"}. Press Enter to edit.`);
+    card.title = "Click to edit";
+    card.addEventListener("click", (e) => {
+      if (e.target.closest("button, a, input, select, textarea, summary")) return;
+      if (String(window.getSelection())) return;
+      openEditor(r);
+    });
+    card.addEventListener("keydown", (e) => {
+      if (e.target === card && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        openEditor(r);
+      }
+    });
+  }
   return card;
 }
 
 async function deleteRule(r) {
-  if (!confirm(`Delete rule "${r.name}"?`)) return;
+  const yes = await confirmDialog({
+    title: "Delete this rule?",
+    message: [h("strong", {}, r.name), " will be removed and stop reacting to events. Its past runs stay in the event log."],
+    confirmLabel: "Delete rule", danger: true,
+  });
+  if (!yes) return;
   await api("DELETE", `/api/rules/${r.id}`);
   loadRules();
 }
 
 // Starts a rule test, then polls it so each step shows up as it finishes.
 async function testRule(r) {
+  const n = r.actions.length;
+  const yes = await confirmDialog({
+    title: "Run this rule now?",
+    message: ["Testing runs ", h("strong", {}, r.name), `'s ${n} action${n === 1 ? "" : "s"} for real with a sample event, so they will call your devices (move cameras, trigger outputs, send messages…). Its trigger, cooldown and “ignore while running” don't apply.`],
+    confirmLabel: "Run test",
+  });
+  if (!yes) return;
   showResult(`Testing "${r.name}"…`, h("p.muted", {}, "Starting…"));
   let start;
   try {
@@ -781,9 +811,21 @@ async function fillEventDetail(row, id) {
     h("div.row", {}, matrixLink(ev, "Open in Matrix ↗"), isAdmin() ? h("button.btn.small", {
       onclick: async (evt) => {
         evt.stopPropagation();
-        const res = await api("POST", `/api/events/${id}/replay`);
-        // The replayed event arrives through the live stream.
-        alert(`Replayed: ${res.matchedRules.length} rule(s) matched.`);
+        const btn = evt.currentTarget;
+        const yes = await confirmDialog({
+          title: "Replay this event?",
+          message: [`This sends the ${ev.topic}:${ev.code} event through all enabled rules again, as a test. Matching rules will run their actions for real and call your devices. Cooldowns and “ignore while running” still apply.`],
+          confirmLabel: "Replay",
+        });
+        if (!yes) return;
+        try {
+          const res = await api("POST", `/api/events/${id}/replay`);
+          // The replayed event itself arrives through the live stream.
+          const n = res.matchedRules.length;
+          flashButton(btn, n ? `Replayed · ${n} rule${n === 1 ? "" : "s"} matched` : "Replayed · no rules matched", "copied");
+        } catch (e) {
+          await infoDialog("Replay failed", e.message);
+        }
       },
     }, "Replay through rules") : null),
   );
@@ -886,8 +928,13 @@ async function loadSecrets() {
       " ",
       h("button.btn.small.danger", {
         onclick: async () => {
-          const warn = s.usedBy.length ? `\n\nRules using it will fail: ${s.usedBy.join(", ")}` : "";
-          if (!confirm(`Delete secret ${s.name}?${warn}`)) return;
+          const yes = await confirmDialog({
+            title: "Delete this secret?",
+            message: [h("code", {}, s.name), " will be permanently deleted. Its value can't be recovered.",
+              s.usedBy.length ? h("span.error", {}, ` These will fail until it's re-added: ${s.usedBy.join(", ")}.`) : null],
+            confirmLabel: "Delete secret", danger: true,
+          });
+          if (!yes) return;
           await api("DELETE", `/api/secrets/${encodeURIComponent(s.name)}`);
           loadSecrets();
         },
@@ -1155,11 +1202,16 @@ function wireRequestEditor() {
 }
 
 async function deleteRequest(sr) {
-  if (!confirm(`Delete saved request "${sr.name}"?`)) return;
+  const yes = await confirmDialog({
+    title: "Delete this saved request?",
+    message: [h("strong", {}, sr.name), " will be removed. Rules can no longer use it."],
+    confirmLabel: "Delete request", danger: true,
+  });
+  if (!yes) return;
   try {
     await api("DELETE", `/api/requests/${sr.id}`);
   } catch (e) {
-    alert(`Can't delete "${sr.name}": ${e.message}`);
+    await infoDialog(`Can't delete “${sr.name}”`, e.message);
   }
   loadRequests();
 }
@@ -1180,7 +1232,11 @@ function testRequest(sr) {
     loadRequests();
   };
   if (!sr.params.length) {
-    run({});
+    confirmDialog({
+      title: "Run this request now?",
+      message: ["Testing sends ", h("strong", {}, sr.name), " for real, so it will call the device it points at."],
+      confirmLabel: "Run test",
+    }).then((yes) => yes && run({}));
     return;
   }
   const form = h("form.params-box", {},
@@ -1273,3 +1329,45 @@ function applyRuleActivity(ev) {
   }
   tickProgress();
 }
+
+// ---------- confirm dialog ----------
+// confirmDialog asks before anything that changes data or calls real
+// devices. Resolves true only on the confirm button; Cancel (focused by
+// default, so a stray Enter is harmless), Esc and a backdrop click are no.
+function confirmDialog({ title, message, confirmLabel = "OK", danger = false, cancelLabel = "Cancel" }) {
+  const dlg = $("#confirm-dlg");
+  $("#confirm-title").textContent = title;
+  $("#confirm-msg").replaceChildren(...[].concat(message).filter((m) => m !== null && m !== undefined && m !== ""));
+  const ok = $("#confirm-ok");
+  const cancel = $("#confirm-cancel");
+  ok.textContent = confirmLabel || "";
+  ok.className = "btn " + (danger ? "danger-solid" : "primary");
+  ok.hidden = confirmLabel === null;
+  cancel.textContent = cancelLabel;
+  return new Promise((resolve) => {
+    const finish = (answer) => {
+      ok.removeEventListener("click", onOk);
+      cancel.removeEventListener("click", onCancel);
+      dlg.removeEventListener("close", onClose);
+      dlg.removeEventListener("click", onBackdrop);
+      if (dlg.open) dlg.close();
+      resolve(answer);
+    };
+    const onOk = () => finish(true);
+    const onCancel = () => finish(false);
+    const onClose = () => finish(false); // Esc
+    const onBackdrop = (e) => {
+      const r = dlg.getBoundingClientRect();
+      if (e.target === dlg && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom)) finish(false);
+    };
+    ok.addEventListener("click", onOk);
+    cancel.addEventListener("click", onCancel);
+    dlg.addEventListener("close", onClose);
+    dlg.addEventListener("click", onBackdrop);
+    dlg.showModal();
+    cancel.focus();
+  });
+}
+
+// infoDialog shows a message with just a Close button.
+const infoDialog = (title, message) => confirmDialog({ title, message, confirmLabel: null, cancelLabel: "Close" });

@@ -195,6 +195,15 @@
     </form>
   </dialog>
 
+  <dialog id="confirm-dlg" class="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-msg">
+    <h2 id="confirm-title">Are you sure?</h2>
+    <p id="confirm-msg" class="muted"></p>
+    <footer class="dlg-foot">
+      <button type="button" class="btn" id="confirm-cancel">Cancel</button>
+      <button type="button" class="btn primary" id="confirm-ok">OK</button>
+    </footer>
+  </dialog>
+
   <dialog id="discard-dlg" class="confirm" aria-labelledby="discard-title">
     <h2 id="discard-title">Discard unsaved changes?</h2>
     <p class="muted">You've made changes since opening this editor. If you close it now, they'll be lost.</p>

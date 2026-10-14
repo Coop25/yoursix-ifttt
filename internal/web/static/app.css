@@ -204,3 +204,15 @@ span.progress { display: inline-flex; align-items: center; gap: 4px; font-varian
   .pulse-dot { animation: none; }
   .delay-fill { transition: none; }
 }
+.btn.danger-solid { background: var(--bad); border-color: var(--bad); color: #fff; }
+#confirm-msg { margin: 0; line-height: 1.5; }
+/* Rule cards: a status bar on the left (green = enabled, grey = disabled),
+   and the whole card opens the editor for admins. */
+.card.rule-card { border-left-width: 4px; }
+.card.rule-card.enabled { border-left-color: var(--ok); }
+.card.rule-card.disabled { border-left-color: var(--muted); }
+.card.rule-card.enabled.is-running { border-left-color: var(--ok); }
+.card.rule-card.clickable { cursor: pointer; transition: border-color .15s, background-color .15s; }
+.card.rule-card.clickable:hover { background: color-mix(in srgb, var(--chip) 45%, var(--panel)); }
+.card.rule-card.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.card.rule-card.clickable :is(.actions-list, .summary) { cursor: pointer; }
