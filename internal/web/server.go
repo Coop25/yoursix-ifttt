@@ -74,9 +74,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/secrets/{name}", admin(s.handlePutSecret))
 	mux.Handle("DELETE /api/secrets/{name}", admin(s.handleDeleteSecret))
 
-	// UI (static; all data comes from the gated API).
+	// UI (static; all data comes from the gated API). Public, like the files
+	// themselves, so a stale login page can be refreshed too; POST plus the
+	// cross-origin check below keeps other sites from triggering it.
 	sub, _ := fs.Sub(staticFS, "static")
-	mux.Handle("GET /", http.FileServerFS(sub))
+	mux.Handle("GET /", staticHandler(sub))
+	mux.HandleFunc("POST /ui/clear-cache", handleClearCache)
 
 	// Rejects cross-site state-changing browser requests (Sec-Fetch-Site /
 	// Origin checks). Webhooks come from a server, not a browser, so they

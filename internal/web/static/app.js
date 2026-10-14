@@ -59,6 +59,7 @@ const isAdmin = () => state.me && state.me.role === "admin";
 document.addEventListener("DOMContentLoaded", boot);
 
 async function boot() {
+  $("#reload-ui").addEventListener("click", reloadUI);
   const params = new URLSearchParams(location.search);
   if (params.get("login") === "denied") $("#login-msg").textContent = "That Discord account isn't on the allow list.";
   if (params.has("login")) history.replaceState(null, "", "/");
@@ -753,4 +754,28 @@ function wireEditorClose() {
     const r = confirmDlg.getBoundingClientRect();
     if (e.target === confirmDlg && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom)) confirmDlg.close();
   });
+}
+
+// ---------- reload UI ----------
+// Drop cached UI files and reload. Clear-Site-Data (from the server) empties
+// the browser's HTTP cache for this site on HTTPS/localhost without signing
+// out; fetching with cache:"reload" also replaces the cached copies over
+// plain HTTP, where browsers ignore that header.
+async function reloadUI(e) {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  btn.classList.add("spinning");
+  try {
+    await fetch("/ui/clear-cache", { method: "POST", cache: "no-store" });
+  } catch {
+    // Server unreachable: still try a hard reload below.
+  }
+  try {
+    if ("caches" in window) {
+      for (const key of await caches.keys()) await caches.delete(key);
+    }
+    await Promise.all(["/", "/index.html", "/app.js", "/app.css"].map((u) => fetch(u, { cache: "reload" }).catch(() => {})));
+  } finally {
+    location.reload();
+  }
 }
