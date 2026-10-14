@@ -10,9 +10,9 @@ import (
 )
 
 // staticHandler serves the embedded UI. Every response carries
-// Cache-Control: no-cache plus an ETag of the file's content, so browsers
-// revalidate on each load: a cheap 304 when unchanged, and the new files
-// immediately after an upgrade instead of a stale UI.
+// Cache-Control: no-cache, no-transform plus an ETag of the file's content,
+// so browsers revalidate on each load: a cheap 304 when unchanged, and the
+// new files immediately after an upgrade instead of a stale UI.
 func staticHandler(files fs.FS) http.Handler {
 	etags := map[string]string{}
 	_ = fs.WalkDir(files, ".", func(p string, d fs.DirEntry, err error) error {
@@ -34,7 +34,9 @@ func staticHandler(files fs.FS) http.Handler {
 		if name == "" {
 			name = "index.html"
 		}
-		w.Header().Set("Cache-Control", "no-cache")
+		// no-transform: proxies (Cloudflare included) must not rewrite these
+		// files, e.g. inject analytics scripts the CSP would block anyway.
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		if tag, ok := etags[name]; ok {
 			// FileServer honours If-None-Match against this header.
 			w.Header().Set("ETag", tag)

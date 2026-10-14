@@ -80,6 +80,10 @@ func (s *Server) Handler() http.Handler {
 	sub, _ := fs.Sub(staticFS, "static")
 	mux.Handle("GET /", staticHandler(sub))
 	mux.HandleFunc("POST /ui/clear-cache", handleClearCache)
+	// Some clients still ask for /favicon.ico without reading the <link>.
+	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/favicon.svg", http.StatusMovedPermanently)
+	})
 
 	// Rejects cross-site state-changing browser requests (Sec-Fetch-Site /
 	// Origin checks). Webhooks come from a server, not a browser, so they

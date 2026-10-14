@@ -7,14 +7,14 @@ import (
 
 func TestStaticFilesRevalidate(t *testing.T) {
 	srv, _ := newTestServer(t, false)
-	for _, p := range []string{"/", "/app.js", "/app.css"} {
+	for _, p := range []string{"/", "/app.js", "/app.css", "/favicon.svg"} {
 		resp, err := http.Get(srv.URL + p)
 		if err != nil {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
 		etag := resp.Header.Get("ETag")
-		if resp.StatusCode != 200 || resp.Header.Get("Cache-Control") != "no-cache" || etag == "" {
+		if resp.StatusCode != 200 || resp.Header.Get("Cache-Control") != "no-cache, no-transform" || etag == "" {
 			t.Fatalf("%s: status %d cache-control %q etag %q", p, resp.StatusCode, resp.Header.Get("Cache-Control"), etag)
 		}
 
@@ -59,5 +59,23 @@ func TestClearCacheEndpoint(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden || resp.Header.Get("Clear-Site-Data") != "" {
 		t.Fatalf("cross-site: %d %q", resp.StatusCode, resp.Header.Get("Clear-Site-Data"))
+	}
+}
+
+func TestFaviconICORedirects(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Get(srv.URL + "/favicon.ico")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMovedPermanently || resp.Header.Get("Location") != "/favicon.svg" {
+		t.Fatalf("favicon.ico: %d -> %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	resp, _ = http.Get(srv.URL + "/favicon.svg")
+	resp.Body.Close()
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "image/svg+xml" {
+		t.Fatalf("favicon.svg: %d %q", resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
 }
