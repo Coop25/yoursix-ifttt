@@ -6,6 +6,42 @@ A small Go service that receives [YourSix event webhooks](https://docs.yoursix.c
 - **Behind Discord login:** the web UI for editing rules, viewing the event and run history, testing rules, and simulating events.
 - **Storage:** SQLite in a Docker volume. The image is a single static binary on distroless.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/rules-dark.png">
+  <img alt="Rules list showing triggers, actions, cooldown and one-at-a-time badges" src="docs/screenshots/rules-light.png">
+</picture>
+
+## Screenshots
+
+**Event log.** Every webhook is recorded with the rules it triggered. Expand one to see each action's result.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/events-dark.png">
+  <img alt="Event log with an expanded run showing each action's HTTP status and response" src="docs/screenshots/events-light.png">
+</picture>
+
+**Rule editor.** Pick topics and event codes, add filters, and build the action list. You can also switch to raw JSON.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/editor-dark.png">
+  <img alt="Rule editor with cooldown settings, event code pickers, filters and an HTTP action using digest auth" src="docs/screenshots/editor-light.png">
+</picture>
+
+**Secrets.** Encrypted, write-only, and private to each admin.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/secrets-dark.png">
+  <img alt="Secrets tab listing secret names and the rules that use them, with no values shown" src="docs/screenshots/secrets-light.png">
+</picture>
+
+**Setup.** Shows the webhook URL to paste into YourSix, and lets you simulate any event.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/setup-dark.png">
+  <img alt="Setup tab showing the webhook URL and the event simulator" src="docs/screenshots/setup-light.png">
+</picture>
+
+
 ## How rules work
 
 A rule has an **If** part, a list of **Then** actions, and an optional cooldown.
