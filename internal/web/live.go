@@ -31,6 +31,8 @@ var errTooManyStreams = errors.New("too many live connections")
 type liveHub struct {
 	store *store.Store
 	log   *slog.Logger
+	// decorate fills in derived fields (e.g. the Matrix link) before sending.
+	decorate func(*store.EventView)
 
 	mu      sync.Mutex
 	subs    map[chan []byte]struct{}
@@ -103,6 +105,9 @@ func (h *liveHub) loop() {
 				continue
 			}
 			ev.Payload = nil // the list shape; details are fetched on expand
+			if h.decorate != nil {
+				h.decorate(&ev)
+			}
 			msg, err := json.Marshal(ev)
 			if err != nil {
 				continue

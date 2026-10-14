@@ -178,3 +178,8 @@ tr.ev.fresh td { animation: fresh-row 2.5s ease-out; }
 @media (prefers-reduced-motion: reduce) {
   .live-pill[data-status="live"] .dot, tr.ev.fresh td { animation: none; }
 }
+/* "Open in Matrix" links on the event log. */
+table.events td.video { width: 1%; white-space: nowrap; text-align: right; }
+.matrix-link { white-space: nowrap; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (max-width: 640px) { table.events td.video .matrix-link { padding: 3px 8px; } }

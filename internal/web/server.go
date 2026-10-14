@@ -42,6 +42,7 @@ func New(cfg config.Config, st *store.Store, eng *engine.Engine, sm *secrets.Man
 		version: version,
 	}
 	s.live = newLiveHub(st, log)
+	s.live.decorate = s.withMatrix
 	eng.OnChange = s.live.Notify
 	return s
 }

@@ -13,7 +13,7 @@ A small Go service that receives [YourSix event webhooks](https://docs.yoursix.c
 
 ## Screenshots
 
-**Event log.** Every webhook is recorded with the rules it triggered, and new events and rule results appear live. Expand one to see each action's result.
+**Event log.** Every webhook is recorded with the rules it triggered, and new events and rule results appear live. Expand one to see each action's result. **Matrix ↗** opens the event's camera in the YourSix Matrix, playing back from when it happened.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/events-dark.png">
@@ -100,6 +100,16 @@ The **Secrets** tab (admins only) stores credentials such as camera passwords:
 
 **Key handling:** if you lose or change the key, stored secrets can't be decrypted and must be re-entered. Back up `.env` separately from the data volume.
 
+### Open in Matrix
+
+Each event in the log has a **Matrix ↗** button, and its expanded view has **Open in Matrix ↗**. Both use YourSix's [Matrix deeplinks](https://docs.yoursix.com/reference/integration) to open the event's video, playing back from the moment it **occurred**:
+
+- Camera events with a `videoSourceId` open that stream: `deviceIds=<deviceId>_<videoSourceId + 1>` (events count sources from 0, the Matrix from 1).
+- Other device events open the whole device: `deviceIds=<deviceId>`.
+- Alarm group events open the group: `alarmGroupId=<groupId>`.
+
+The timestamp is in seconds with milliseconds, for example `1791996197.084`. Set `Y6IFTTT_YOURSIX_PLATFORM_URL` if your organization uses a different YourSix web address.
+
 ### Ignoring events (rate limiting)
 
 Each rule can accept an event and log it without acting on it:
@@ -181,5 +191,6 @@ All settings are environment variables prefixed `Y6IFTTT_`. See [.env.example](.
 | `SECRET_*` | | Values exposed to templates via `{{ secret "*" }}` |
 | `EVENT_RETENTION_DAYS` | `30` | Event and run history retention |
 | `SECRETS_KEY` | | 32-byte key (hex/base64) enabling the encrypted Secrets tab |
+| `YOURSIX_PLATFORM_URL` | `https://platform.yoursix.com` | YourSix web app for "Open in Matrix" links |
 | `SEED_RULES_DIR` | | Import `*.json` rules on first start (empty DB only) |
 | `DEV_AUTH` | `false` | Local testing only: skip Discord login |

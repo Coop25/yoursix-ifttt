@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver, keeps the binary CGO-free
@@ -388,6 +389,35 @@ type EventView struct {
 	Test        bool            `json:"test"`
 	Payload     json.RawMessage `json:"payload,omitempty"`
 	Runs        []RunView       `json:"runs"`
+
+	// From eventData, for linking to the event's video. MatrixURL is filled
+	// in by the web layer, which knows the platform URL.
+	DeviceID      string `json:"deviceId,omitempty"`
+	VideoSourceID string `json:"videoSourceId,omitempty"`
+	GroupID       string `json:"groupId,omitempty"`
+	MatrixURL     string `json:"matrixUrl,omitempty"`
+}
+
+// setRefs reads the device, video source and alarm group from a stored
+// payload. videoSourceId may be a string or a number.
+func (e *EventView) setRefs(payload []byte) {
+	var p struct {
+		EventData struct {
+			DeviceID      string `json:"deviceId"`
+			VideoSourceID any    `json:"videoSourceId"`
+			GroupID       string `json:"groupId"`
+		} `json:"eventData"`
+	}
+	if json.Unmarshal(payload, &p) != nil {
+		return
+	}
+	e.DeviceID, e.GroupID = p.EventData.DeviceID, p.EventData.GroupID
+	switch v := p.EventData.VideoSourceID.(type) {
+	case string:
+		e.VideoSourceID = v
+	case float64:
+		e.VideoSourceID = strconv.FormatFloat(v, 'f', -1, 64)
+	}
 }
 
 // ListEvents returns newest-first events with their runs. beforeID pages.
@@ -395,7 +425,7 @@ func (s *Store) ListEvents(ctx context.Context, limit int, beforeID int64) ([]Ev
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	q := `SELECT id, COALESCE(event_id,''), topic, code, description, occurred, received_at, source_ip, test FROM events`
+	q := `SELECT id, COALESCE(event_id,''), topic, code, description, occurred, received_at, source_ip, test, payload FROM events`
 	args := []any{}
 	if beforeID > 0 {
 		q += ` WHERE id < ?`
@@ -412,16 +442,18 @@ func (s *Store) ListEvents(ctx context.Context, limit int, beforeID int64) ([]Ev
 	idx := map[int64]int{}
 	for rows.Next() {
 		var (
-			e    EventView
-			recv sql.NullString
-			test int
+			e       EventView
+			recv    sql.NullString
+			test    int
+			payload []byte
 		)
-		if err := rows.Scan(&e.ID, &e.EventID, &e.Topic, &e.Code, &e.Description, &e.Occurred, &recv, &e.SourceIP, &test); err != nil {
+		if err := rows.Scan(&e.ID, &e.EventID, &e.Topic, &e.Code, &e.Description, &e.Occurred, &recv, &e.SourceIP, &test, &payload); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		e.ReceivedAt = parseTime(recv)
 		e.Test = test == 1
+		e.setRefs(payload)
 		e.Runs = []RunView{}
 		idx[e.ID] = len(out)
 		out = append(out, e)
@@ -464,6 +496,7 @@ func (s *Store) GetEvent(ctx context.Context, id int64) (EventView, error) {
 	e.ReceivedAt = parseTime(recv)
 	e.Test = test == 1
 	e.Payload = json.RawMessage(payload)
+	e.setRefs(e.Payload)
 	if e.Runs, err = s.runsBetween(ctx, id, id); err != nil {
 		return e, err
 	}

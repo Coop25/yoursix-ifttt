@@ -157,3 +157,41 @@ func TestLiveStreamEndsOnShutdown(t *testing.T) {
 		}
 	}
 }
+
+func TestEventsCarryMatrixLink(t *testing.T) {
+	ts, _, _ := newLiveServer(t, true)
+	lines, stop := openStream(t, ts.URL)
+	defer stop()
+
+	cam := yoursix.Sample("device", "vmd") // videoSourceId "0"
+	cam.EventOccurred = "2026-10-14T16:43:17.084Z"
+	body, _ := json.Marshal(cam)
+	postHook(t, ts.URL+"/hook/"+testToken, yoursix.UserAgent, body)
+	group := yoursix.Sample("alarmgroup", "armed")
+	body, _ = json.Marshal(group)
+	postHook(t, ts.URL+"/hook/"+testToken, yoursix.UserAgent, body)
+
+	wantCam := "https://platform.yoursix.com/matrix?deviceIds=" + cam.EventData["deviceId"].(string) + "_1&timestamp=1791996197.084"
+	wantGroup := "https://platform.yoursix.com/matrix?alarmGroupId=" + group.EventData["groupId"].(string) + "&timestamp="
+
+	// Pushed live...
+	pushed := nextEvent(t, lines, func(ev store.EventView) bool { return ev.Code == "vmd" })
+	if pushed.MatrixURL != wantCam {
+		t.Fatalf("pushed link:\n got %s\nwant %s", pushed.MatrixURL, wantCam)
+	}
+	// ...and in the list.
+	resp, err := http.Get(ts.URL + "/api/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list []store.EventView
+	_ = json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+	got := map[string]string{}
+	for _, ev := range list {
+		got[ev.Code] = ev.MatrixURL
+	}
+	if got["vmd"] != wantCam || !strings.HasPrefix(got["armed"], wantGroup) {
+		t.Fatalf("list links: %v", got)
+	}
+}

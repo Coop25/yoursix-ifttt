@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"time"
 
 	"yoursix-ifttt/internal/rules"
 	"yoursix-ifttt/internal/store"
@@ -240,6 +241,9 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, err)
 		return
 	}
+	for i := range list {
+		s.withMatrix(&list[i])
+	}
 	writeJSON(w, http.StatusOK, list)
 }
 
@@ -254,6 +258,7 @@ func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, err)
 		return
 	}
+	s.withMatrix(&ev)
 	writeJSON(w, http.StatusOK, ev)
 }
 
@@ -296,4 +301,14 @@ func (s *Server) simulate(w http.ResponseWriter, r *http.Request, payload []byte
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// withMatrix adds the "Open in Matrix" deeplink: the event's camera (or
+// alarm group) playing back from when it occurred.
+func (s *Server) withMatrix(ev *store.EventView) {
+	at := ev.ReceivedAt
+	if t, err := time.Parse(time.RFC3339, ev.Occurred); err == nil {
+		at = t
+	}
+	ev.MatrixURL = yoursix.MatrixURL(s.cfg.PlatformURL, ev.DeviceID, ev.VideoSourceID, ev.GroupID, at)
 }

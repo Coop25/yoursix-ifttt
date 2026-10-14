@@ -583,7 +583,7 @@ function readVisual() {
 // The list loads once, then stays current through the server's live stream
 // (GET /api/events/stream): each pushed event replaces its own row, so
 // expanded rows stay open and nothing flickers.
-const emptyEventsRow = (text) => h("tr", {}, h("td.empty", { colspan: 4 }, text));
+const emptyEventsRow = (text) => h("tr", {}, h("td.empty", { colspan: 5 }, text));
 
 async function loadEvents(older) {
   const body = $("#events-body");
@@ -627,6 +627,7 @@ function eventRow(e) {
     h("td", {}, h("code", {}, `${e.topic}:${e.code}`), " ", h("span.muted", {}, e.description), e.test ? h("span.badge.test", {}, "test") : null),
     h("td.muted.small", {}, e.sourceIp),
     h("td", {}, e.runs.length ? e.runs.map((r) => h(`span.badge.${r.status}`, { title: r.status }, r.ruleName)) : h("span.muted.small", {}, "no match")),
+    h("td.video", {}, matrixLink(e, "Matrix ↗")),
   );
   tr.dataset.id = e.id;
   tr.addEventListener("click", () => toggleEvent(tr, e.id));
@@ -657,13 +658,24 @@ function upsertEvent(ev) {
   if (row) row.classList.add("fresh");
 }
 
+// matrixLink opens the event in the YourSix Matrix (its camera or alarm group,
+// playing back from when it happened) in a new tab.
+function matrixLink(e, label) {
+  if (!e.matrixUrl) return null;
+  return h("a.btn.small.matrix-link", {
+    href: e.matrixUrl, target: "_blank", rel: "noopener noreferrer",
+    title: "Open this event's video in the YourSix Matrix, at the time it happened",
+    onclick: (ev) => ev.stopPropagation(), // don't also expand the row
+  }, label);
+}
+
 function toggleEvent(tr, id) {
   const next = tr.nextElementSibling;
   if (next && next.classList.contains("detail")) {
     next.remove();
     return;
   }
-  const d = h("tr.detail", {}, h("td", { colspan: 4 }, h("p.muted", {}, "Loading…")));
+  const d = h("tr.detail", {}, h("td", { colspan: 5 }, h("p.muted", {}, "Loading…")));
   d.dataset.id = id;
   tr.after(d);
   fillEventDetail(d, id);
@@ -730,19 +742,19 @@ const skipReason = {
 
 async function fillEventDetail(row, id) {
   const ev = await api("GET", `/api/events/${id}`);
-  const cell = h("td", { colspan: 4 },
+  const cell = h("td", { colspan: 5 },
     ev.runs.map((r) => h("div", {},
       h("h3", {}, r.ruleName, " ", h(`span.badge.${r.status}`, {}, r.status)),
       skipReason[r.status] ? h("p.muted", {}, skipReason[r.status]) : renderSteps(r.steps))),
     h("details", {}, h("summary", {}, "Payload"), h("pre", {}, JSON.stringify(ev.payload, null, 2))),
-    isAdmin() ? h("div.row", {}, h("button.btn.small", {
+    h("div.row", {}, matrixLink(ev, "Open in Matrix ↗"), isAdmin() ? h("button.btn.small", {
       onclick: async (evt) => {
         evt.stopPropagation();
         const res = await api("POST", `/api/events/${id}/replay`);
         // The replayed event arrives through the live stream.
         alert(`Replayed: ${res.matchedRules.length} rule(s) matched.`);
       },
-    }, "Replay through rules")) : null,
+    }, "Replay through rules") : null),
   );
   row.replaceChildren(cell);
 }

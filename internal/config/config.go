@@ -24,6 +24,8 @@ type Config struct {
 	SeedRulesDir   string
 	// SecretsKey enables the encrypted secrets manager (32 bytes, hex or base64).
 	SecretsKey string
+	// PlatformURL is the YourSix web app used for "Open in Matrix" links.
+	PlatformURL string
 }
 
 type WebhookConfig struct {
@@ -74,6 +76,7 @@ type raw struct {
 	DevAuth             bool     `envconfig:"DEV_AUTH" default:"false"`
 	SeedRulesDir        string   `envconfig:"SEED_RULES_DIR"`
 	SecretsKey          string   `envconfig:"SECRETS_KEY"`
+	PlatformURL         string   `envconfig:"YOURSIX_PLATFORM_URL" default:"https://platform.yoursix.com"`
 }
 
 func Load() (Config, error) {
@@ -107,6 +110,7 @@ func Load() (Config, error) {
 		DevAuth:      r.DevAuth,
 		SeedRulesDir: strings.TrimSpace(r.SeedRulesDir),
 		SecretsKey:   strings.TrimSpace(r.SecretsKey),
+		PlatformURL:  strings.TrimRight(strings.TrimSpace(r.PlatformURL), "/"),
 	}
 	if c.Auth.RedirectURL == "" && c.PublicURL != "" {
 		c.Auth.RedirectURL = c.PublicURL + "/auth/callback"
