@@ -118,6 +118,8 @@ var addedColumns = []struct{ table, column, def string }{
 	{"rules", "last_finished_at", "TEXT"},
 	{"rules", "updated_by", "TEXT NOT NULL DEFAULT ''"},
 	{"rules", "updated_by_name", "TEXT NOT NULL DEFAULT ''"},
+	{"runs", "total_steps", "INTEGER NOT NULL DEFAULT 0"},
+	{"runs", "current_json", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func migrate(db *sql.DB) error {
@@ -161,6 +163,8 @@ type RuleView struct {
 	LastFinishedAt *time.Time `json:"lastFinishedAt,omitempty"`
 	// Running is filled in by the API from engine state.
 	Running int `json:"running"`
+	// ActiveRuns are this rule's runs in progress (filled in by the API).
+	ActiveRuns []RunView `json:"activeRuns,omitempty"`
 }
 
 const ruleCols = `id, name, enabled, trigger_json, actions_json, cooldown_seconds, cooldown_from, skip_if_running, last_fired_at, last_finished_at, created_at, updated_at, updated_by, updated_by_name`
@@ -375,6 +379,23 @@ type RunView struct {
 	StartedAt  time.Time            `json:"startedAt"`
 	FinishedAt *time.Time           `json:"finishedAt,omitempty"`
 	Steps      []actions.StepResult `json:"steps"`
+	// TotalSteps is the rule's action count when the run started.
+	TotalSteps int `json:"totalSteps"`
+	// Current is the step in progress, while the run is running.
+	Current *StepInProgress `json:"current,omitempty"`
+}
+
+// StepInProgress describes the action a running rule is on. ElapsedMs and
+// RemainingMs are computed when the view is built, from the server's clock,
+// so a browser with a skewed clock can still count down correctly.
+type StepInProgress struct {
+	Index       int        `json:"index"`
+	Type        string     `json:"type"`
+	Name        string     `json:"name"`
+	StartedAt   time.Time  `json:"startedAt"`
+	Until       *time.Time `json:"until,omitempty"` // delays only
+	ElapsedMs   int64      `json:"elapsedMs"`
+	RemainingMs *int64     `json:"remainingMs,omitempty"` // delays only
 }
 
 type EventView struct {
@@ -505,20 +526,26 @@ func (s *Store) GetEvent(ctx context.Context, id int64) (EventView, error) {
 
 func (s *Store) runsBetween(ctx context.Context, lo, hi int64) ([]RunView, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, event_row, rule_id, rule_name, status, started_at, finished_at, steps_json
-		 FROM runs WHERE event_row BETWEEN ? AND ? ORDER BY id`, lo, hi)
+		`SELECT `+runCols+` FROM runs WHERE event_row BETWEEN ? AND ? ORDER BY id`, lo, hi)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanRuns(rows)
+}
+
+const runCols = `id, event_row, rule_id, rule_name, status, started_at, finished_at, steps_json, total_steps, current_json`
+
+func scanRuns(rows *sql.Rows) ([]RunView, error) {
 	out := []RunView{}
+	nowT := time.Now()
 	for rows.Next() {
 		var (
 			r                 RunView
 			started, finished sql.NullString
-			steps             string
+			steps, current    string
 		)
-		if err := rows.Scan(&r.ID, &r.EventRow, &r.RuleID, &r.RuleName, &r.Status, &started, &finished, &steps); err != nil {
+		if err := rows.Scan(&r.ID, &r.EventRow, &r.RuleID, &r.RuleName, &r.Status, &started, &finished, &steps, &r.TotalSteps, &current); err != nil {
 			return nil, err
 		}
 		r.StartedAt = parseTime(started)
@@ -529,9 +556,41 @@ func (s *Store) runsBetween(ctx context.Context, lo, hi int64) ([]RunView, error
 		if r.Steps == nil {
 			r.Steps = []actions.StepResult{}
 		}
+		if current != "" && r.Status == RunRunning {
+			var cur StepInProgress
+			if json.Unmarshal([]byte(current), &cur) == nil {
+				cur.ElapsedMs = max(nowT.Sub(cur.StartedAt).Milliseconds(), 0)
+				if cur.Until != nil {
+					rem := max(cur.Until.Sub(nowT).Milliseconds(), 0)
+					cur.RemainingMs = &rem
+				}
+				r.Current = &cur
+			}
+		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ActiveRuns returns every run still in progress, for the Rules tab.
+func (s *Store) ActiveRuns(ctx context.Context) ([]RunView, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+runCols+` FROM runs WHERE status=? ORDER BY id`, RunRunning)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRuns(rows)
+}
+
+// UpdateRunCurrent records which step a running run is on.
+func (s *Store) UpdateRunCurrent(ctx context.Context, runID int64, cur StepInProgress) error {
+	cur.ElapsedMs, cur.RemainingMs = 0, nil // computed on read
+	b, err := json.Marshal(cur)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE runs SET current_json=? WHERE id=? AND status=?`, string(b), runID, RunRunning)
+	return err
 }
 
 // ---- runs ----
@@ -542,8 +601,8 @@ func (s *Store) StartRun(ctx context.Context, eventRow int64, rule rules.Rule, s
 		finished = now()
 	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO runs (event_row, rule_id, rule_name, status, started_at, finished_at) VALUES (?,?,?,?,?,?)`,
-		eventRow, rule.ID, rule.Name, status, now(), finished)
+		`INSERT INTO runs (event_row, rule_id, rule_name, status, started_at, finished_at, total_steps) VALUES (?,?,?,?,?,?,?)`,
+		eventRow, rule.ID, rule.Name, status, now(), finished, len(rule.Actions))
 	if err != nil {
 		return 0, err
 	}
@@ -555,7 +614,7 @@ func (s *Store) FinishRun(ctx context.Context, runID int64, status string, steps
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE runs SET status=?, finished_at=?, steps_json=? WHERE id=?`, status, now(), string(b), runID)
+	_, err = s.db.ExecContext(ctx, `UPDATE runs SET status=?, finished_at=?, steps_json=?, current_json='' WHERE id=?`, status, now(), string(b), runID)
 	return err
 }
 
@@ -593,7 +652,7 @@ func (s *Store) GetRun(ctx context.Context, runID int64) (RunView, error) {
 
 // FailInterruptedRuns marks runs left "running" by a previous process.
 func (s *Store) FailInterruptedRuns(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE runs SET status=?, finished_at=? WHERE status=?`, RunFailed, now(), RunRunning)
+	_, err := s.db.ExecContext(ctx, `UPDATE runs SET status=?, finished_at=?, current_json='' WHERE status=?`, RunFailed, now(), RunRunning)
 	return err
 }
 

@@ -94,8 +94,18 @@ func (s *Server) handleListRules(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, err)
 		return
 	}
+	active, err := s.store.ActiveRuns(r.Context())
+	if err != nil {
+		s.storeError(w, err)
+		return
+	}
+	byRule := map[int64][]store.RunView{}
+	for _, run := range active {
+		byRule[run.RuleID] = append(byRule[run.RuleID], run)
+	}
 	for i := range list {
 		list[i].Running = s.engine.Running(list[i].ID)
+		list[i].ActiveRuns = byRule[list[i].ID]
 	}
 	writeJSON(w, http.StatusOK, list)
 }

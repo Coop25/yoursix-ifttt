@@ -103,3 +103,90 @@ func TestTestRunIsBackgroundAndSurvivesRequestCancel(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// While a rule runs, its current step (with a countdown for delays) and its
+// step count are visible on the run and in /api/rules, and cleared after.
+func TestRunShowsCurrentStepAndDelayCountdown(t *testing.T) {
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release }))
+	defer slow.Close()
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+
+	srv, st := newTestServer(t, true)
+	rule, err := st.CreateRule(context.Background(), rules.Rule{
+		Name: "progress", Enabled: true,
+		Actions: []rules.Action{
+			{Type: rules.ActionDelay, Name: "Settle", DelayMillis: 1500},
+			{Type: rules.ActionHTTP, URL: slow.URL, TimeoutSeconds: 30},
+		},
+	}, store.Editor{ID: "dev"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(fmt.Sprintf("%s/api/rules/%d/test", srv.URL, rule.ID), "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started struct {
+		Run store.RunView `json:"run"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&started)
+	resp.Body.Close()
+
+	get := func() store.RunView {
+		resp, err := http.Get(fmt.Sprintf("%s/api/runs/%d", srv.URL, started.Run.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var run store.RunView
+		_ = json.NewDecoder(resp.Body).Decode(&run)
+		return run
+	}
+	waitFor := func(what string, ok func(store.RunView) bool) store.RunView {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			run := get()
+			if ok(run) {
+				return run
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: %+v (current %+v)", what, run, run.Current)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	delay := waitFor("delay in progress", func(r store.RunView) bool { return r.Current != nil && r.Current.Type == "delay" })
+	if delay.TotalSteps != 2 || delay.Current.Index != 0 || delay.Current.Name != "Settle" ||
+		delay.Current.RemainingMs == nil || *delay.Current.RemainingMs <= 0 || *delay.Current.RemainingMs > 1500 || delay.Current.Until == nil {
+		t.Fatalf("delay step: total %d current %+v", delay.TotalSteps, delay.Current)
+	}
+
+	// The rule's card data shows it running.
+	rresp, _ := http.Get(srv.URL + "/api/rules")
+	var list []store.RuleView
+	_ = json.NewDecoder(rresp.Body).Decode(&list)
+	rresp.Body.Close()
+	if len(list) != 1 || len(list[0].ActiveRuns) != 1 || list[0].ActiveRuns[0].Current == nil {
+		t.Fatalf("active runs in /api/rules: %+v", list)
+	}
+
+	httpStep := waitFor("http step in progress", func(r store.RunView) bool { return r.Current != nil && r.Current.Index == 1 })
+	if httpStep.Current.Type != "http" || httpStep.Current.Name != "HTTP request" || httpStep.Current.RemainingMs != nil || len(httpStep.Steps) != 1 {
+		t.Fatalf("http step: %+v steps %d", httpStep.Current, len(httpStep.Steps))
+	}
+
+	close(release)
+	done := waitFor("finished", func(r store.RunView) bool { return r.Status != store.RunRunning })
+	if done.Status != store.RunOK || done.Current != nil {
+		t.Fatalf("finished run: %s current %+v", done.Status, done.Current)
+	}
+}

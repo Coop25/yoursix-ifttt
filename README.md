@@ -62,6 +62,12 @@ A rule has an **If** part, a list of **Then** actions, and an optional cooldown.
 
 By default a failing action stops the rule. Set `continueOnError` on an action to keep going after it fails.
 
+While a rule runs, the UI shows it live:
+
+- The rule's card on the **Rules** tab is highlighted and reads, e.g., *Step 2 of 4 · Settle · 4.2s left*. Its finished steps are ticked and the current one is marked.
+- The event's badge in the **Events** log shows, e.g., *2/4 · 4.2s*.
+- **Delay** steps count down with a progress bar; other steps show elapsed time.
+
 URL, body, header values, password and message are Go templates:
 
 ```

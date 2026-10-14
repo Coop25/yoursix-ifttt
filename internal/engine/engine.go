@@ -137,13 +137,47 @@ func (e *Engine) StartTestRun(ctx context.Context, r rules.Rule, ev yoursix.Even
 	go func() {
 		defer e.wg.Done()
 		steps, ok := e.runner.RunWith(e.ctx, r.Actions, ev.TemplateData(r.Name), actions.RunOptions{
-			Secrets: e.secrets.LookupFor(e.ctx, r.UpdatedBy),
-			Owner:   r.UpdatedBy,
-			OnStep:  e.progress(row, runID),
+			Secrets:     e.secrets.LookupFor(e.ctx, r.UpdatedBy),
+			Owner:       r.UpdatedBy,
+			OnStep:      e.progress(row, runID),
+			OnStepStart: e.stepStarted(row, runID),
 		})
 		e.finish(row, runID, r, ev, steps, ok)
 	}()
 	return store.RunView{ID: runID, EventRow: row, RuleID: r.ID, RuleName: r.Name, Status: store.RunRunning, Steps: []actions.StepResult{}}, nil
+}
+
+// stepStarted records which step a run is on (and, for a delay, when it
+// ends), so the UI can show live progress and a countdown.
+func (e *Engine) stepStarted(row, runID int64) func(int, rules.Action, time.Time) {
+	return func(i int, a rules.Action, until time.Time) {
+		cur := store.StepInProgress{Index: i, Type: a.Type, Name: e.stepLabel(a), StartedAt: time.Now()}
+		if !until.IsZero() {
+			cur.Until = &until
+		}
+		if err := e.store.UpdateRunCurrent(context.Background(), runID, cur); err != nil {
+			e.log.Error("save current step", "run", runID, "err", err)
+		}
+		e.changed(row)
+	}
+}
+
+func (e *Engine) stepLabel(a rules.Action) string {
+	if a.Name != "" {
+		return a.Name
+	}
+	switch a.Type {
+	case rules.ActionRequest:
+		if sr, err := e.store.SavedRequest(context.Background(), a.RequestID); err == nil {
+			return sr.Name
+		}
+		return "Saved request"
+	case rules.ActionDelay:
+		return "Delay"
+	case rules.ActionDiscord:
+		return "Discord message"
+	}
+	return "HTTP request"
 }
 
 // progress saves a run's completed steps as it goes, so the UI can show
@@ -247,9 +281,10 @@ func (e *Engine) startRun(row int64, r rules.Rule, ev yoursix.Event) {
 		defer func() { <-e.sem }()
 
 		steps, ok := e.runner.RunWith(e.ctx, r.Actions, ev.TemplateData(r.Name), actions.RunOptions{
-			Secrets: e.secrets.LookupFor(e.ctx, r.UpdatedBy),
-			Owner:   r.UpdatedBy,
-			OnStep:  e.progress(row, runID),
+			Secrets:     e.secrets.LookupFor(e.ctx, r.UpdatedBy),
+			Owner:       r.UpdatedBy,
+			OnStep:      e.progress(row, runID),
+			OnStepStart: e.stepStarted(row, runID),
 		})
 		e.finish(row, runID, r, ev, steps, ok)
 	}()

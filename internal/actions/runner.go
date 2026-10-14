@@ -65,6 +65,9 @@ type RunOptions struct {
 	Owner string
 	// OnStep, if set, gets the results so far after each action finishes.
 	OnStep func([]StepResult)
+	// OnStepStart, if set, is called as each action begins. For a delay, until
+	// is when it will end (zero otherwise), so the UI can count down.
+	OnStepStart func(index int, a rules.Action, until time.Time)
 }
 
 func NewRunner(defaultDiscordWebhook, version string) *Runner {
@@ -110,6 +113,13 @@ func (r *Runner) RunWith(ctx context.Context, actions []rules.Action, data map[s
 			continue
 		}
 		start := time.Now()
+		if opts.OnStepStart != nil {
+			var until time.Time
+			if a.Type == rules.ActionDelay {
+				until = start.Add(time.Duration(a.DelayMillis) * time.Millisecond)
+			}
+			opts.OnStepStart(i, a, until)
+		}
 		err := r.runOne(ctx, a, data, lk, opts.Owner, &res)
 		res.DurationMs = time.Since(start).Milliseconds()
 		if err != nil {

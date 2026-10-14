@@ -183,3 +183,24 @@ table.events td.video { width: 1%; white-space: nowrap; text-align: right; }
 .matrix-link { white-space: nowrap; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @media (max-width: 640px) { table.events td.video .matrix-link { padding: 3px 8px; } }
+/* Live run progress. */
+.card.is-running { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.rule-activity { display: grid; gap: 6px; margin: 8px 0 2px; }
+.progress { color: var(--text); }
+div.progress { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.progress-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+span.progress { display: inline-flex; align-items: center; gap: 4px; font-variant-numeric: tabular-nums; }
+.countdown, .elapsed { font-variant-numeric: tabular-nums; font-weight: 600; }
+.countdown { color: var(--warn); }
+.pulse-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 4px; flex: none; animation: live-pulse 1.2s ease-in-out infinite; }
+.delay-bar { height: 4px; border-radius: 2px; background: var(--chip); margin-top: 6px; overflow: hidden; }
+.delay-fill { height: 100%; width: 0; background: var(--warn); transition: width .25s linear; }
+.badge-live { display: inline-flex; align-items: center; gap: 2px; }
+.actions-list li.step-done { color: var(--muted); }
+.actions-list li.step-done::marker { content: "✓ "; color: var(--ok); }
+.actions-list li.step-current { font-weight: 600; color: var(--accent); }
+.actions-list li.step-current::marker { content: "▶ "; color: var(--accent); }
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot { animation: none; }
+  .delay-fill { transition: none; }
+}

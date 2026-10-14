@@ -141,8 +141,11 @@ function showTab(tab) {
   if (location.hash !== `#${tab}`) history.replaceState(null, "", `#${tab}`);
   $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $$(".view").forEach((v) => v.classList.toggle("hidden", v.id !== `view-${tab}`));
-  if (tab !== "events") stopLive();
-  if (tab === "rules") loadRules();
+  if (!liveTabs.includes(tab)) stopLive();
+  if (tab === "rules") {
+    startLive();
+    loadRules();
+  }
   if (tab === "requests") loadRequests();
   if (tab === "events") {
     startLive();
@@ -155,6 +158,7 @@ function showTab(tab) {
 // ---------- rules ----------
 async function loadRules() {
   [state.rules, state.requests] = await Promise.all([api("GET", "/api/rules"), api("GET", "/api/requests")]);
+  state.rules.forEach((r) => (r.activeRuns || []).forEach(stampRun));
   const list = $("#rules-list");
   if (!state.rules.length) {
     list.replaceChildren(h("div.empty", {}, isAdmin() ? "No rules yet. Create one to react to YourSix events." : "No rules yet."));
@@ -188,11 +192,14 @@ function actionSummary(a) {
 
 function ruleCard(r) {
   const admin = isAdmin();
-  return h("div.card" + (r.enabled ? "" : ".disabled"), {},
+  const active = r.activeRuns || [];
+  // Mark the rule's own action list with the first active run's position.
+  const cur = active[0] && active[0].current;
+  const card = h("div.card" + (r.enabled ? "" : ".disabled") + (active.length ? ".is-running" : ""), {},
     h("div.card-head", {},
       h("h3", {}, r.name),
       r.enabled ? h("span.badge.ok", {}, "enabled") : h("span.badge", {}, "disabled"),
-      r.running ? h("span.badge.running", {}, r.running > 1 ? `running ×${r.running}` : "running") : null,
+      active.length ? h("span.badge.running", {}, active.length > 1 ? `running ×${active.length}` : "running") : null,
       r.skipIfRunning ? h("span.badge", { title: "New events are ignored while a run is in progress" }, "one at a time") : null,
       r.cooldownSeconds ? h("span.badge", { title: `Ignores events for ${r.cooldownSeconds}s after the last run ${r.cooldownFrom === "finish" ? "finished" : "started"}` }, `once per ${fmtDuration(r.cooldownSeconds)}${r.cooldownFrom === "finish" ? " after finish" : ""}`) : null,
       h("span.muted.small", { title: fmtTime(r.lastFiredAt) }, `fired ${ago(r.lastFiredAt)}`),
@@ -200,12 +207,15 @@ function ruleCard(r) {
       admin ? h("button.btn.small", { onclick: () => openEditor(r) }, "Edit") : null,
       admin ? h("button.btn.small.danger", { onclick: () => deleteRule(r) }, "Delete") : null,
     ),
+    active.length ? h("div.rule-activity", { "aria-live": "polite" }, active.map((run) => runProgress(run))) : null,
     h("p.summary", {}, triggerSummary(r.trigger)),
     r.updatedByName && r.updatedBy !== state.me.id
       ? h("p.muted.small", {}, `Saved by ${r.updatedByName}: runs with their secrets. Saving it yourself makes it yours.`)
       : null,
-    h("ol.actions-list", {}, r.actions.map((a) => h("li", {}, actionSummary(a)))),
+    h("ol.actions-list", {}, r.actions.map((a, i) => h("li" + (cur ? (i < cur.index ? ".step-done" : i === cur.index ? ".step-current" : "") : ""), {}, actionSummary(a)))),
   );
+  card.dataset.ruleId = r.id;
+  return card;
 }
 
 async function deleteRule(r) {
@@ -237,9 +247,12 @@ async function pollRun(title, start, total, note = "") {
   const sample = h("details", {}, h("summary", {}, "Sample event used"), h("pre", {}, JSON.stringify(start.event, null, 2)));
   const render = (run) => {
     const running = run.status === "running";
+    stampRun(run);
+    if (!run.totalSteps) run.totalSteps = total;
     showResult(title,
-      h("p", {}, "Status: ", h(`span.badge.${run.status}`, {}, running ? `running · step ${Math.min(run.steps.length + 1, total)} of ${total}` : run.status), note),
-      run.steps.length ? renderSteps(run.steps) : h("p.muted", {}, "Waiting for the first action…"),
+      h("p", {}, "Status: ", h(`span.badge.${run.status}`, {}, run.status), note),
+      running ? runProgress(run) : null,
+      run.steps.length ? renderSteps(run.steps) : running ? null : h("p.muted", {}, "No steps recorded."),
       running ? h("p.muted.small", {}, "You can close this dialog; the test keeps running and its result appears in the Events tab.") : null,
       sample,
     );
@@ -592,6 +605,7 @@ async function loadEvents(older) {
   let page;
   try {
     page = await api("GET", `/api/events?limit=50${before ? `&before=${before}` : ""}`);
+    page.forEach(stampEvent);
   } catch (e) {
     if (!state.events.length) body.replaceChildren(emptyEventsRow(`Couldn't load events: ${e.message}`));
     return;
@@ -626,7 +640,11 @@ function eventRow(e) {
     h("td", { title: fmtTime(e.receivedAt), "data-time": e.receivedAt }, ago(e.receivedAt)),
     h("td", {}, h("code", {}, `${e.topic}:${e.code}`), " ", h("span.muted", {}, e.description), e.test ? h("span.badge.test", {}, "test") : null),
     h("td.muted.small", {}, e.sourceIp),
-    h("td", {}, e.runs.length ? e.runs.map((r) => h(`span.badge.${r.status}`, { title: r.status }, r.ruleName)) : h("span.muted.small", {}, "no match")),
+    h("td", {}, e.runs.length
+      ? e.runs.map((r) => r.status === "running"
+        ? h("span.badge.running.badge-live", {}, r.ruleName, " · ", runProgress(r, { compact: true }))
+        : h(`span.badge.${r.status}`, { title: r.status }, r.ruleName))
+      : h("span.muted.small", {}, "no match")),
     h("td.video", {}, matrixLink(e, "Matrix ↗")),
   );
   tr.dataset.id = e.id;
@@ -694,6 +712,10 @@ function setLiveStatus(status) {
   pill.title = status === "live" ? "New events and rule results appear here as they happen." : "Not receiving live updates right now; use Refresh.";
 }
 
+// Tabs that show live data: the event log, and rules' running state.
+const liveTabs = ["rules", "events"];
+const currentTab = () => ($("#tabs button.active") || {}).dataset?.tab;
+
 function startLive() {
   if (state.live) return;
   const es = new EventSource("/api/events/stream");
@@ -703,12 +725,17 @@ function startLive() {
   es.addEventListener("open", () => {
     setLiveStatus("live");
     // After a reconnect, catch up on anything missed while disconnected.
-    if (connectedBefore) loadEvents();
+    if (connectedBefore) {
+      if (!$("#view-events").classList.contains("hidden")) loadEvents();
+      if (!$("#view-rules").classList.contains("hidden")) loadRules();
+    }
     connectedBefore = true;
   });
   es.addEventListener("event", (m) => {
     try {
-      upsertEvent(JSON.parse(m.data));
+      const ev = stampEvent(JSON.parse(m.data));
+      if (!$("#view-events").classList.contains("hidden")) upsertEvent(ev);
+      if (!$("#view-rules").classList.contains("hidden")) applyRuleActivity(ev);
     } catch {
       // ignore a malformed message
     }
@@ -722,7 +749,7 @@ function startLive() {
       // The browser gave up (e.g. the server refused); try again shortly.
       setLiveStatus("offline");
       if (state.live === es) state.live = null;
-      setTimeout(() => { if (!$("#view-events").classList.contains("hidden")) startLive(); }, 5000);
+      setTimeout(() => { if (liveTabs.includes(currentTab())) startLive(); }, 5000);
     } else {
       setLiveStatus("reconnecting");
     }
@@ -742,10 +769,14 @@ const skipReason = {
 
 async function fillEventDetail(row, id) {
   const ev = await api("GET", `/api/events/${id}`);
+  stampEvent(ev);
   const cell = h("td", { colspan: 5 },
     ev.runs.map((r) => h("div", {},
       h("h3", {}, r.ruleName, " ", h(`span.badge.${r.status}`, {}, r.status)),
-      skipReason[r.status] ? h("p.muted", {}, skipReason[r.status]) : renderSteps(r.steps))),
+      skipReason[r.status] ? h("p.muted", {}, skipReason[r.status]) : [
+        r.status === "running" ? runProgress(r) : null,
+        r.steps.length || r.status !== "running" ? renderSteps(r.steps) : null,
+      ])),
     h("details", {}, h("summary", {}, "Payload"), h("pre", {}, JSON.stringify(ev.payload, null, 2))),
     h("div.row", {}, matrixLink(ev, "Open in Matrix ↗"), isAdmin() ? h("button.btn.small", {
       onclick: async (evt) => {
@@ -1167,4 +1198,78 @@ function testRequest(sr) {
   });
   showResult(`Test: ${sr.name}`, form);
   $("input", form)?.focus();
+}
+
+// ---------- live run progress ----------
+// The server sends a running step's elapsed/remaining time from its own
+// clock. Turn those into local deadlines once, when the data arrives, so
+// countdowns are right even if this computer's clock is off.
+function stampRun(run) {
+  const cur = run && run.current;
+  if (cur && cur._startedLocal === undefined) {
+    const now = Date.now();
+    cur._startedLocal = now - (cur.elapsedMs || 0);
+    if (cur.remainingMs != null) {
+      cur._untilLocal = now + cur.remainingMs;
+      cur._durationMs = (cur.elapsedMs || 0) + cur.remainingMs;
+    }
+  }
+  return run;
+}
+const stampEvent = (ev) => { (ev.runs || []).forEach(stampRun); return ev; };
+
+function fmtClock(ms) {
+  const s = Math.max(0, ms) / 1000;
+  if (s < 10) return `${s.toFixed(1)}s`;
+  if (s < 60) return `${Math.floor(s)}s`;
+  return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+}
+
+// runProgress shows what a running rule is doing: "Step 2 of 4 · Settle ·
+// 4.2s left" (delays count down, with a bar) or "… · 3s elapsed".
+// compact is the short form for badges: "2/4 · 4.2s".
+function runProgress(run, { compact = false } = {}) {
+  stampRun(run);
+  const cur = run.current;
+  const total = run.totalSteps || "?";
+  if (!cur) return h(compact ? "span.progress" : "div.progress", {}, h("span.pulse-dot", { "aria-hidden": "true" }), "Starting…");
+  const isDelay = cur._untilLocal !== undefined;
+  const timer = isDelay
+    ? h("span.countdown", { "data-until": cur._untilLocal, "data-suffix": compact ? "" : " left" }, fmtClock(cur._untilLocal - Date.now()) + (compact ? "" : " left"))
+    : h("span.elapsed", { "data-since": cur._startedLocal, "data-suffix": compact ? "" : " elapsed" }, fmtClock(Date.now() - cur._startedLocal) + (compact ? "" : " elapsed"));
+  if (compact) {
+    return h("span.progress", { title: `Step ${cur.index + 1} of ${total}: ${cur.name}` }, h("span.pulse-dot", { "aria-hidden": "true" }), `${cur.index + 1}/${total} · `, timer);
+  }
+  const bar = isDelay ? h("div.delay-bar", { "aria-hidden": "true" }, h("div.delay-fill", { "data-start": cur._untilLocal - cur._durationMs, "data-until": cur._untilLocal })) : null;
+  return h("div.progress", {},
+    h("div.progress-line", {}, h("span.pulse-dot", { "aria-hidden": "true" }), h("strong", {}, `Step ${cur.index + 1} of ${total}`), ` · ${cur.name} · `, timer),
+    bar);
+}
+
+// One ticker keeps every countdown, elapsed timer and delay bar moving.
+function tickProgress() {
+  const now = Date.now();
+  for (const el of $$("[data-until].countdown")) el.textContent = fmtClock(Number(el.dataset.until) - now) + (el.dataset.suffix || "");
+  for (const el of $$("[data-since]")) el.textContent = fmtClock(now - Number(el.dataset.since)) + (el.dataset.suffix || "");
+  for (const el of $$(".delay-fill")) {
+    const start = Number(el.dataset.start), until = Number(el.dataset.until);
+    const pct = until > start ? Math.min(100, Math.max(0, ((now - start) / (until - start)) * 100)) : 100;
+    el.style.width = `${pct}%`;
+  }
+}
+setInterval(tickProgress, 250);
+
+// applyRuleActivity updates rule cards from a pushed event's runs, so the
+// Rules tab shows runs starting, progressing and finishing live.
+function applyRuleActivity(ev) {
+  for (const run of ev.runs || []) {
+    const rule = state.rules.find((r) => r.id === run.ruleId);
+    if (!rule) continue;
+    const before = (rule.activeRuns || []).filter((x) => x.id !== run.id);
+    rule.activeRuns = run.status === "running" ? before.concat(stampRun(run)) : before;
+    if (run.status !== "running" && run.status !== "cooldown" && run.status !== "busy") rule.lastFiredAt = rule.lastFiredAt || run.startedAt;
+    const card = $(`#rules-list .card[data-rule-id="${rule.id}"]`);
+    if (card) card.replaceWith(ruleCard(rule));
+  }
+  tickProgress();
 }
