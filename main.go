@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // active hours need time zones even without system tzdata
 
 	"yoursix-ifttt/internal/actions"
 	"yoursix-ifttt/internal/config"

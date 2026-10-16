@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"yoursix-ifttt/internal/rules"
@@ -66,10 +67,16 @@ func pathID(r *http.Request) (int64, bool) {
 }
 
 func (s *Server) storeError(w http.ResponseWriter, err error) {
-	var ve store.ValidationError
+	var (
+		ve       store.ValidationError
+		conflict store.ConflictError
+	)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
+	case errors.As(err, &conflict):
+		// The editor shows what changed and offers to overwrite.
+		writeJSON(w, http.StatusConflict, map[string]any{"error": conflict.Error(), "conflict": true, "current": conflict.Current})
 	case errors.As(err, &ve):
 		writeError(w, http.StatusBadRequest, ve.Error())
 	default:
@@ -172,7 +179,7 @@ func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad id")
 		return
 	}
-	if err := s.store.DeleteRule(r.Context(), id); err != nil {
+	if err := s.store.DeleteRule(r.Context(), id, editorFor(userFrom(r.Context()))); err != nil {
 		s.storeError(w, err)
 		return
 	}
@@ -208,14 +215,7 @@ func (s *Server) handleTestRule(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		topic, code := yoursix.TopicDevice, "vmd"
-		if len(rule.Trigger.Topics) > 0 {
-			topic = rule.Trigger.Topics[0]
-		}
-		if len(rule.Trigger.Codes) > 0 {
-			code = rule.Trigger.Codes[0]
-		}
-		ev = yoursix.Sample(topic, code)
+		ev = sampleFor(rule.Trigger)
 	}
 	ev.EventID = "" // test runs never collide with real deliveries
 	raw, _ := json.Marshal(ev)
@@ -244,9 +244,25 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
-	list, err := s.store.ListEvents(r.Context(), limit, before)
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	before, _ := strconv.ParseInt(q.Get("before"), 10, 64)
+	f := store.EventQuery{Limit: limit, Before: before, Text: q.Get("q"), Outcome: q.Get("outcome")}
+	// since/until are RFC 3339 instants (the UI sends local day bounds).
+	for _, p := range []struct {
+		name string
+		dst  *time.Time
+	}{{"since", &f.Since}, {"until", &f.Until}} {
+		if v := q.Get(p.name); v != "" {
+			t, err := time.Parse(time.RFC3339, v)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, p.name+" must be an RFC 3339 time")
+				return
+			}
+			*p.dst = t
+		}
+	}
+	list, err := s.store.SearchEvents(r.Context(), f)
 	if err != nil {
 		s.storeError(w, err)
 		return
@@ -321,4 +337,64 @@ func (s *Server) withMatrix(ev *store.EventView) {
 		at = t
 	}
 	ev.MatrixURL = yoursix.MatrixURL(s.cfg.PlatformURL, ev.DeviceID, ev.VideoSourceID, ev.GroupID, at)
+}
+
+// handleHistory lists the edit log, newest first: ?kind=rule|action,
+// ?id=N for one item, ?before=REVISION_ID to page.
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	f := store.HistoryFilter{Kind: q.Get("kind")}
+	switch f.Kind {
+	case "", store.KindRule, store.KindAction, store.KindSchedule:
+	default:
+		writeError(w, http.StatusBadRequest, "kind must be rule, action or schedule")
+		return
+	}
+	f.ItemID, _ = strconv.ParseInt(q.Get("id"), 10, 64)
+	f.Before, _ = strconv.ParseInt(q.Get("before"), 10, 64)
+	f.Limit, _ = strconv.Atoi(q.Get("limit"))
+	list, err := s.store.ListRevisions(r.Context(), f)
+	if err != nil {
+		s.storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// sampleFor is a sample event for a trigger's first topic and code.
+func sampleFor(t rules.Trigger) yoursix.Event {
+	topic, code := yoursix.TopicDevice, "vmd"
+	if len(t.Topics) > 0 {
+		topic = t.Topics[0]
+	}
+	if len(t.Codes) > 0 {
+		code = t.Codes[0]
+		// A qualified code ("device:vmd") names its own topic.
+		if i := strings.IndexByte(code, ':'); i > 0 {
+			topic, code = code[:i], code[i+1:]
+		}
+	}
+	return yoursix.Sample(topic, code)
+}
+
+// handlePreview renders a rule's templates (as being edited, not saved)
+// against an event: the given payload, or a sample matching its trigger.
+func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Rule  rules.Rule      `json:"rule"`
+		Event json.RawMessage `json:"event"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	ev := sampleFor(req.Rule.Trigger)
+	if len(req.Event) > 0 && string(req.Event) != "null" {
+		var err error
+		if ev, err = yoursix.Parse(req.Event); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	acts, onFailure := s.engine.Preview(r.Context(), req.Rule, ev)
+	writeJSON(w, http.StatusOK, map[string]any{"event": ev, "matchesTrigger": req.Rule.Trigger.Matches(ev), "actions": acts, "onFailure": onFailure})
 }

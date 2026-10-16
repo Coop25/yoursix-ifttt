@@ -28,6 +28,11 @@ type Rule struct {
 	// SkipIfRunning ignores matching events while a previous run of this
 	// rule is still executing. The event is still recorded.
 	SkipIfRunning bool `json:"skipIfRunning,omitempty"`
+	// ScheduleID, if set, picks a Schedule that limits when the rule runs.
+	ScheduleID int64 `json:"scheduleId,omitempty"`
+	// OnFailure runs after Actions when any of them fails, e.g. to post an
+	// alert. Its templates also see .failure (step, stepNumber, error).
+	OnFailure []Action `json:"onFailure,omitempty"`
 	// UpdatedBy is the Discord ID of the admin who last saved the rule. The
 	// rule runs with that admin's secrets. Always set by the server.
 	UpdatedBy     string    `json:"updatedBy,omitempty"`
@@ -292,7 +297,21 @@ func (r *Rule) Validate() error {
 			return fmt.Errorf("action %d: %w", i+1, err)
 		}
 	}
+	for i := range r.OnFailure {
+		if err := r.OnFailure[i].validate(); err != nil {
+			return fmt.Errorf("on-failure action %d: %w", i+1, err)
+		}
+	}
+	if r.ScheduleID < 0 {
+		return errors.New("scheduleId must be a schedule's ID")
+	}
 	return nil
+}
+
+// AllActions is the rule's actions followed by its on-failure actions, for
+// checks that apply to both (templates, secrets, saved-action use).
+func (r Rule) AllActions() []Action {
+	return append(slices.Clip(r.Actions), r.OnFailure...)
 }
 
 func (a *Action) validate() error {
@@ -328,7 +347,7 @@ func (a *Action) validate() error {
 		}
 	case ActionRequest:
 		if a.RequestID <= 0 {
-			return errors.New("choose a saved request")
+			return errors.New("choose a saved action")
 		}
 		for k := range a.Params {
 			if !validParam.MatchString(k) {

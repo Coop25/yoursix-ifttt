@@ -38,6 +38,8 @@ type StepResult struct {
 	Response   string `json:"response,omitempty"`
 	Error      string `json:"error,omitempty"`
 	DurationMs int64  `json:"durationMs"`
+	// OnFailure marks steps from the rule's on-failure actions.
+	OnFailure bool `json:"onFailure,omitempty"`
 }
 
 // Runner executes action lists.
@@ -116,8 +118,8 @@ func (r *Runner) RunWith(ctx context.Context, actions []rules.Action, data map[s
 		start := time.Now()
 		if opts.OnStepStart != nil {
 			var until time.Time
-			if a.Type == rules.ActionDelay {
-				until = start.Add(time.Duration(a.DelayMillis) * time.Millisecond)
+			if ms := r.delayOf(ctx, a); ms > 0 {
+				until = start.Add(time.Duration(ms) * time.Millisecond)
 			}
 			opts.OnStepStart(i, a, until)
 		}
@@ -573,31 +575,49 @@ func isErrno(err error, codes ...syscall.Errno) bool {
 	return slices.Contains(codes, errno)
 }
 
-// noSecrets rejects {{ secret }} in saved-request parameters: a rule's
-// parameters may be fed into a request someone else wrote (and could point
-// anywhere), so they must never carry secrets.
-func noSecrets(string) (string, error) {
-	return "", errors.New("secrets can't be used in saved-request parameters; put the secret in the saved request itself")
+// delayOf is how long a step waits, if it's a delay or a saved delay, so
+// progress can show a countdown.
+func (r *Runner) delayOf(ctx context.Context, a rules.Action) int {
+	switch a.Type {
+	case rules.ActionDelay:
+		return a.DelayMillis
+	case rules.ActionRequest:
+		if r.Requests != nil {
+			if sr, err := r.Requests.SavedRequest(ctx, a.RequestID); err == nil && sr.Request.Type == rules.ActionDelay {
+				return sr.Request.DelayMillis
+			}
+		}
+	}
+	return 0
 }
 
+// noSecrets rejects {{ secret }} in saved-action parameters: a rule's
+// parameters may be fed into an action someone else wrote (and could point
+// anywhere), so they must never carry secrets.
+func noSecrets(string) (string, error) {
+	return "", errors.New("secrets can't be used in saved-action parameters; put the secret in the saved action itself")
+}
+
+// runSavedRequest runs a saved action (an HTTP request, delay or Discord
+// message) with the rule's parameter values.
 func (r *Runner) runSavedRequest(ctx context.Context, a rules.Action, data map[string]any, lk SecretLookup, owner string, res *StepResult) error {
 	if r.Requests == nil {
-		return errors.New("saved requests are not available")
+		return errors.New("saved actions are not available")
 	}
 	sr, err := r.Requests.SavedRequest(ctx, a.RequestID)
 	if err != nil {
-		return fmt.Errorf("saved request #%d: %w", a.RequestID, err)
+		return fmt.Errorf("saved action #%d: %w", a.RequestID, err)
 	}
 	if res.Name == "" {
 		res.Name = sr.Name
 	}
-	// Re-checked at run time, against the request as it is now.
+	// Re-checked at run time, against the action as it is now.
 	refs, err := SecretRefs([]rules.Action{sr.Request})
 	if err != nil {
-		return fmt.Errorf("saved request %q: %w", sr.Name, err)
+		return fmt.Errorf("saved action %q: %w", sr.Name, err)
 	}
 	if len(refs) > 0 && sr.UpdatedBy != owner {
-		return fmt.Errorf("saved request %q uses secrets belonging to %s; only their rules can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))
+		return fmt.Errorf("saved action %q uses secrets belonging to %s; only their rules can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))
 	}
 
 	given := make(map[string]string, len(a.Params))
@@ -618,9 +638,15 @@ func (r *Runner) runSavedRequest(ctx context.Context, a rules.Action, data map[s
 		withParams[k] = v
 	}
 	withParams["params"] = params
-	req := sr.Request
-	req.Type = rules.ActionHTTP
-	return r.runHTTP(ctx, req, withParams, lk, res)
+	switch sr.Request.Type {
+	case "", rules.ActionHTTP:
+		req := sr.Request
+		req.Type = rules.ActionHTTP
+		return r.runHTTP(ctx, req, withParams, lk, res)
+	case rules.ActionDelay, rules.ActionDiscord:
+		return r.runOne(ctx, sr.Request, withParams, lk, owner, res)
+	}
+	return fmt.Errorf("saved action %q can't run actions of type %q", sr.Name, sr.Request.Type)
 }
 
 func nameOr(name, fallback string) string {
@@ -643,7 +669,7 @@ func ParamSecretRefs(actions []rules.Action) error {
 				return fmt.Errorf("action %d, parameter %s: %w", i+1, k, err)
 			}
 			if len(names) > 0 {
-				return fmt.Errorf("action %d, parameter %s: secrets can't be used in parameters; put the secret in the saved request itself", i+1, k)
+				return fmt.Errorf("action %d, parameter %s: secrets can't be used in parameters; put the secret in the saved action itself", i+1, k)
 			}
 		}
 	}

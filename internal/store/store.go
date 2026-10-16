@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver, keeps the binary CGO-free
@@ -73,6 +74,19 @@ CREATE TABLE IF NOT EXISTS requests (
 	updated_at      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS revisions (
+	id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	kind          TEXT NOT NULL,
+	item_id       INTEGER NOT NULL,
+	name          TEXT NOT NULL,
+	change        TEXT NOT NULL,
+	snapshot_json TEXT NOT NULL,
+	by_id         TEXT NOT NULL DEFAULT '',
+	by_name       TEXT NOT NULL DEFAULT '',
+	at            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS revisions_item ON revisions(kind, item_id, id);
+
 CREATE TABLE IF NOT EXISTS secrets (
 	owner_id    TEXT NOT NULL,
 	owner_name  TEXT NOT NULL DEFAULT '',
@@ -92,9 +106,16 @@ const (
 	RunCooldown = "cooldown"
 	// RunBusy: skipped because a previous run of the rule was still going.
 	RunBusy = "busy"
+	// RunOffHours: skipped because the event came outside the rule's
+	// active hours.
+	RunOffHours = "offhours"
 )
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db *sql.DB
+	// fts reports whether the events_fts search index is available.
+	fts bool
+}
 
 func Open(path string) (*Store, error) {
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
@@ -108,7 +129,7 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, fts: setupFTS(db) == nil}, nil
 }
 
 // Columns added after the first release; ALTERed in when missing.
@@ -120,10 +141,12 @@ var addedColumns = []struct{ table, column, def string }{
 	{"rules", "updated_by_name", "TEXT NOT NULL DEFAULT ''"},
 	{"runs", "total_steps", "INTEGER NOT NULL DEFAULT 0"},
 	{"runs", "current_json", "TEXT NOT NULL DEFAULT ''"},
+	{"rules", "schedule_id", "INTEGER NOT NULL DEFAULT 0"},
+	{"rules", "on_failure_json", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func migrate(db *sql.DB) error {
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.Exec(schema + schedulesSchema); err != nil {
 		return err
 	}
 	for _, c := range addedColumns {
@@ -167,17 +190,18 @@ type RuleView struct {
 	ActiveRuns []RunView `json:"activeRuns,omitempty"`
 }
 
-const ruleCols = `id, name, enabled, trigger_json, actions_json, cooldown_seconds, cooldown_from, skip_if_running, last_fired_at, last_finished_at, created_at, updated_at, updated_by, updated_by_name`
+const ruleCols = `id, name, enabled, trigger_json, actions_json, cooldown_seconds, cooldown_from, skip_if_running, last_fired_at, last_finished_at, created_at, updated_at, updated_by, updated_by_name, schedule_id, on_failure_json`
 
 func scanRule(row interface{ Scan(...any) error }) (RuleView, error) {
 	var (
 		r                    RuleView
 		enabled, skip        int
 		trig, acts           string
+		onFail               string
 		lastFired, lastDone  sql.NullString
 		createdAt, updatedAt sql.NullString
 	)
-	if err := row.Scan(&r.ID, &r.Name, &enabled, &trig, &acts, &r.CooldownSeconds, &r.CooldownFrom, &skip, &lastFired, &lastDone, &createdAt, &updatedAt, &r.UpdatedBy, &r.UpdatedByName); err != nil {
+	if err := row.Scan(&r.ID, &r.Name, &enabled, &trig, &acts, &r.CooldownSeconds, &r.CooldownFrom, &skip, &lastFired, &lastDone, &createdAt, &updatedAt, &r.UpdatedBy, &r.UpdatedByName, &r.ScheduleID, &onFail); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return r, ErrNotFound
 		}
@@ -191,6 +215,11 @@ func scanRule(row interface{ Scan(...any) error }) (RuleView, error) {
 	if err := json.Unmarshal([]byte(acts), &r.Actions); err != nil {
 		return r, fmt.Errorf("rule %d actions: %w", r.ID, err)
 	}
+	if onFail != "" {
+		if err := json.Unmarshal([]byte(onFail), &r.OnFailure); err != nil {
+			return r, fmt.Errorf("rule %d on-failure actions: %w", r.ID, err)
+		}
+	}
 	r.CreatedAt = parseTime(createdAt)
 	r.UpdatedAt = parseTime(updatedAt)
 	if t := parseTime(lastFired); !t.IsZero() {
@@ -202,8 +231,10 @@ func scanRule(row interface{ Scan(...any) error }) (RuleView, error) {
 	return r, nil
 }
 
-func (s *Store) ListRules(ctx context.Context) ([]RuleView, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+ruleCols+` FROM rules ORDER BY name COLLATE NOCASE`)
+func (s *Store) ListRules(ctx context.Context) ([]RuleView, error) { return listRules(ctx, s.db) }
+
+func listRules(ctx context.Context, q querier) ([]RuleView, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+ruleCols+` FROM rules ORDER BY name COLLATE NOCASE`)
 	if err != nil {
 		return nil, err
 	}
@@ -234,21 +265,66 @@ func (s *Store) EnabledRules(ctx context.Context) ([]rules.Rule, error) {
 }
 
 func (s *Store) GetRule(ctx context.Context, id int64) (RuleView, error) {
-	return scanRule(s.db.QueryRowContext(ctx, `SELECT `+ruleCols+` FROM rules WHERE id = ?`, id))
+	return getRule(ctx, s.db, id)
 }
 
-func prepare(r *rules.Rule) (trig, acts []byte, err error) {
+func getRule(ctx context.Context, q querier, id int64) (RuleView, error) {
+	return scanRule(q.QueryRowContext(ctx, `SELECT `+ruleCols+` FROM rules WHERE id = ?`, id))
+}
+
+// encodedRule is a validated rule's JSON columns.
+type encodedRule struct{ trig, acts, onFail string }
+
+func prepare(r *rules.Rule) (encodedRule, error) {
+	var e encodedRule
 	if err := r.Validate(); err != nil {
-		return nil, nil, err
+		return e, err
 	}
-	if err := actions.CheckTemplates(r.Actions); err != nil {
-		return nil, nil, err
+	if err := actions.CheckTemplates(r.AllActions()); err != nil {
+		return e, err
 	}
-	if trig, err = json.Marshal(r.Trigger); err != nil {
-		return nil, nil, err
+	enc := func(v any) string {
+		b, _ := json.Marshal(v) // plain structs; can't fail
+		return string(b)
 	}
-	acts, err = json.Marshal(r.Actions)
-	return trig, acts, err
+	e.trig, e.acts = enc(r.Trigger), enc(r.Actions)
+	if len(r.OnFailure) > 0 {
+		e.onFail = enc(r.OnFailure)
+	}
+	return e, nil
+}
+
+// ConflictError is returned when saving an item that someone else changed
+// after the editor loaded it (its updatedAt no longer matches). Current is
+// the item as it is now.
+type ConflictError struct {
+	Kind    string
+	Current any
+	By      string
+	At      time.Time
+}
+
+func (e ConflictError) Error() string {
+	what := "rule"
+	if e.Kind == KindAction {
+		what = "saved action"
+	} else if e.Kind == KindSchedule {
+		what = "schedule"
+	}
+	by := e.By
+	if by == "" {
+		by = "someone else"
+	}
+	return fmt.Sprintf("%s changed this %s at %s, after you opened it", by, what, e.At.UTC().Format(time.RFC3339))
+}
+
+// checkFresh rejects a save based on a stale copy. A zero expected time
+// (API clients that don't send updatedAt) skips the check.
+func checkFresh(kind string, expected, actual time.Time, by string, current any) error {
+	if expected.IsZero() || expected.Equal(actual) {
+		return nil
+	}
+	return ConflictError{Kind: kind, Current: current, By: by, At: actual}
 }
 
 // ValidationError wraps rule problems the caller should show to the user.
@@ -261,47 +337,93 @@ func (e ValidationError) Unwrap() error { return e.Err }
 type Editor struct{ ID, Name string }
 
 func (s *Store) CreateRule(ctx context.Context, r rules.Rule, by Editor) (RuleView, error) {
-	trig, acts, err := prepare(&r)
+	enc, err := prepare(&r)
 	if err != nil {
 		return RuleView{}, ValidationError{err}
 	}
-	ts := now()
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO rules (name, enabled, trigger_json, actions_json, cooldown_seconds, cooldown_from, skip_if_running, created_at, updated_at, updated_by, updated_by_name) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		r.Name, boolInt(r.Enabled), string(trig), string(acts), r.CooldownSeconds, r.CooldownFrom, boolInt(r.SkipIfRunning), ts, ts, by.ID, by.Name)
+	var id int64
+	err = s.inTx(ctx, func(q querier) error {
+		if err := checkRefs(ctx, q, r); err != nil {
+			return err
+		}
+		ts := now()
+		res, err := q.ExecContext(ctx,
+			`INSERT INTO rules (name, enabled, trigger_json, actions_json, cooldown_seconds, cooldown_from, skip_if_running, created_at, updated_at, updated_by, updated_by_name, schedule_id, on_failure_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.Name, boolInt(r.Enabled), enc.trig, enc.acts, r.CooldownSeconds, r.CooldownFrom, boolInt(r.SkipIfRunning), ts, ts, by.ID, by.Name, r.ScheduleID, enc.onFail)
+		if err != nil {
+			return err
+		}
+		id, _ = res.LastInsertId()
+		created, err := getRule(ctx, q, id)
+		if err != nil {
+			return err
+		}
+		return record(ctx, q, KindRule, id, created.Name, ChangeCreated, created.Rule, by, nil)
+	})
 	if err != nil {
 		return RuleView{}, err
 	}
-	id, _ := res.LastInsertId()
 	return s.GetRule(ctx, id)
 }
 
+// ruleBase is a rule's state before a change, for the edit log.
+func ruleBase(r RuleView) *revisionBase {
+	return &revisionBase{item: r.Rule, name: r.Name, by: Editor{r.UpdatedBy, r.UpdatedByName}, at: r.UpdatedAt.UTC().Format(time.RFC3339Nano)}
+}
+
 func (s *Store) UpdateRule(ctx context.Context, r rules.Rule, by Editor) (RuleView, error) {
-	trig, acts, err := prepare(&r)
+	enc, err := prepare(&r)
 	if err != nil {
 		return RuleView{}, ValidationError{err}
 	}
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE rules SET name=?, enabled=?, trigger_json=?, actions_json=?, cooldown_seconds=?, cooldown_from=?, skip_if_running=?, updated_at=?, updated_by=?, updated_by_name=? WHERE id=?`,
-		r.Name, boolInt(r.Enabled), string(trig), string(acts), r.CooldownSeconds, r.CooldownFrom, boolInt(r.SkipIfRunning), now(), by.ID, by.Name, r.ID)
+	err = s.inTx(ctx, func(q querier) error {
+		if err := checkRefs(ctx, q, r); err != nil {
+			return err
+		}
+		before, err := getRule(ctx, q, r.ID)
+		if err != nil {
+			return err
+		}
+		if err := checkFresh(KindRule, r.UpdatedAt, before.UpdatedAt, before.UpdatedByName, before); err != nil {
+			return err
+		}
+		was, err := stamp(ctx, q, "rules", r.ID)
+		if err != nil {
+			return err
+		}
+		res, err := q.ExecContext(ctx,
+			`UPDATE rules SET name=?, enabled=?, trigger_json=?, actions_json=?, cooldown_seconds=?, cooldown_from=?, skip_if_running=?, updated_at=?, updated_by=?, updated_by_name=?, schedule_id=?, on_failure_json=? WHERE id=? AND updated_at=?`,
+			r.Name, boolInt(r.Enabled), enc.trig, enc.acts, r.CooldownSeconds, r.CooldownFrom, boolInt(r.SkipIfRunning), now(), by.ID, by.Name, r.ScheduleID, enc.onFail, r.ID, was)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			// Changed between the check and the write.
+			return ConflictError{Kind: KindRule, Current: before, By: before.UpdatedByName, At: before.UpdatedAt}
+		}
+		updated, err := getRule(ctx, q, r.ID)
+		if err != nil {
+			return err
+		}
+		return record(ctx, q, KindRule, r.ID, updated.Name, ChangeUpdated, updated.Rule, by, ruleBase(before))
+	})
 	if err != nil {
 		return RuleView{}, err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return RuleView{}, ErrNotFound
 	}
 	return s.GetRule(ctx, r.ID)
 }
 
-func (s *Store) DeleteRule(ctx context.Context, id int64) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM rules WHERE id=?`, id)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
+func (s *Store) DeleteRule(ctx context.Context, id int64, by Editor) error {
+	return s.inTx(ctx, func(q querier) error {
+		before, err := getRule(ctx, q, id)
+		if err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM rules WHERE id=?`, id); err != nil {
+			return err
+		}
+		return record(ctx, q, KindRule, id, before.Name, ChangeDeleted, before.Rule, by, nil)
+	})
 }
 
 // SeedRules imports every *.json rule in dir, but only when no rules exist
@@ -443,14 +565,75 @@ func (e *EventView) setRefs(payload []byte) {
 
 // ListEvents returns newest-first events with their runs. beforeID pages.
 func (s *Store) ListEvents(ctx context.Context, limit int, beforeID int64) ([]EventView, error) {
+	return s.SearchEvents(ctx, EventQuery{Limit: limit, Before: beforeID})
+}
+
+// Event outcomes EventQuery can filter on.
+const (
+	OutcomeMatched = "matched" // ran at least one rule (any status)
+	OutcomeNoMatch = "nomatch"
+	OutcomeOK      = "ok"
+	OutcomeFailed  = "failed"
+	OutcomeSkipped = "skipped" // a rule matched but was in cooldown, busy or off hours
+	OutcomeTest    = "test"    // simulated, replayed or test runs
+)
+
+// EventQuery selects events. Text is a search (see parseSearch): every free
+// word or "phrase" must appear (case-insensitively) in the event's
+// topic:code, description, source IP, payload or the name of a rule it ran;
+// key:value terms match one field, e.g. device:CAM-01, site:"Head office",
+// rule:gate, code:vmd, ip:10.0., status:failed, or any eventData field.
+// Since and Until bound when it was received.
+type EventQuery struct {
+	Limit        int
+	Before       int64
+	Text         string
+	Outcome      string
+	Since, Until time.Time
+}
+
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+func (s *Store) SearchEvents(ctx context.Context, f EventQuery) ([]EventView, error) {
+	limit := f.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	q := `SELECT id, COALESCE(event_id,''), topic, code, description, occurred, received_at, source_ip, test, payload FROM events`
+	q := `SELECT id, COALESCE(event_id,''), topic, code, description, occurred, received_at, source_ip, test, payload FROM events WHERE 1=1`
 	args := []any{}
-	if beforeID > 0 {
-		q += ` WHERE id < ?`
-		args = append(args, beforeID)
+	if f.Before > 0 {
+		q += ` AND id < ?`
+		args = append(args, f.Before)
+	}
+	cond, condArgs := s.searchSQL(parseSearch(f.Text))
+	q += cond
+	args = append(args, condArgs...)
+	// julianday() compares instants, whatever the stored fraction digits.
+	if !f.Since.IsZero() {
+		q += ` AND julianday(received_at) >= julianday(?)`
+		args = append(args, f.Since.UTC().Format(time.RFC3339Nano))
+	}
+	if !f.Until.IsZero() {
+		q += ` AND julianday(received_at) < julianday(?)`
+		args = append(args, f.Until.UTC().Format(time.RFC3339Nano))
+	}
+	const hasRun = ` AND EXISTS (SELECT 1 FROM runs WHERE runs.event_row = events.id`
+	switch f.Outcome {
+	case "":
+	case OutcomeMatched:
+		q += hasRun + `)`
+	case OutcomeNoMatch:
+		q += ` AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.event_row = events.id)`
+	case OutcomeOK, OutcomeFailed:
+		q += hasRun + ` AND runs.status = ?)`
+		args = append(args, f.Outcome)
+	case OutcomeSkipped:
+		q += hasRun + ` AND runs.status IN (?, ?, ?))`
+		args = append(args, RunCooldown, RunBusy, RunOffHours)
+	case OutcomeTest:
+		q += ` AND test = 1`
+	default:
+		return nil, ValidationError{fmt.Errorf("unknown outcome %q", f.Outcome)}
 	}
 	q += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)

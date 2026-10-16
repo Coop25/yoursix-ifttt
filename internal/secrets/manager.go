@@ -90,7 +90,7 @@ func (m *Manager) List(ctx context.Context, ownerID string) ([]store.SecretMeta,
 		if r.UpdatedBy != ownerID {
 			continue
 		}
-		refs, err := actions.SecretRefs(r.Actions)
+		refs, err := actions.SecretRefs(r.AllActions())
 		if err != nil {
 			continue
 		}
@@ -114,7 +114,7 @@ func (m *Manager) List(ctx context.Context, ownerID string) ([]store.SecretMeta,
 		}
 		for i := range list {
 			if slices.Contains(refs, list[i].Name) {
-				list[i].UsedBy = append(list[i].UsedBy, "Request: "+sr.Name)
+				list[i].UsedBy = append(list[i].UsedBy, "Saved action: "+sr.Name)
 			}
 		}
 	}

@@ -22,7 +22,7 @@ func (s *Server) checkRequestActions(r *http.Request, editorID string, acts []ru
 		}
 		sr, err := s.store.SavedRequest(r.Context(), a.RequestID)
 		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("action %d: saved request #%d doesn't exist", i+1, a.RequestID)
+			return fmt.Errorf("action %d: saved action #%d doesn't exist", i+1, a.RequestID)
 		}
 		if err != nil {
 			return err
@@ -32,7 +32,7 @@ func (s *Server) checkRequestActions(r *http.Request, editorID string, acts []ru
 			return fmt.Errorf("action %d: %w", i+1, err)
 		}
 		if len(refs) > 0 && sr.UpdatedBy != editorID {
-			return fmt.Errorf("action %d: saved request %q uses secrets belonging to %s, so only their rules can use it", i+1, sr.Name, nameOr(sr.UpdatedByName, "another admin"))
+			return fmt.Errorf("action %d: saved action %q uses secrets belonging to %s, so only their rules can use it", i+1, sr.Name, nameOr(sr.UpdatedByName, "another admin"))
 		}
 		// Templated values count as provided; only presence is checked here.
 		present := make(map[string]string, len(a.Params))
@@ -139,7 +139,7 @@ func (s *Server) handleDeleteRequest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad id")
 		return
 	}
-	err := s.store.DeleteRequest(r.Context(), id)
+	err := s.store.DeleteRequest(r.Context(), id, editorFor(userFrom(r.Context())))
 	var inUse store.ErrInUse
 	switch {
 	case errors.As(err, &inUse):
@@ -180,7 +180,7 @@ func (s *Server) handleTestRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	// A throwaway rule owned by the tester: a request that uses secrets only
 	// runs if the tester owns it, exactly as in a real rule.
-	rule := rules.Rule{Name: "Request test: " + sr.Name, Actions: []rules.Action{action}, UpdatedBy: u.ID, UpdatedByName: u.DisplayName}
+	rule := rules.Rule{Name: "Saved action test: " + sr.Name, Actions: []rules.Action{action}, UpdatedBy: u.ID, UpdatedByName: u.DisplayName}
 	ev := yoursix.Sample(yoursix.TopicDevice, "vmd")
 	ev.EventID = ""
 	raw, _ := json.Marshal(ev)

@@ -208,3 +208,59 @@ func TestRuleSettingsPersist(t *testing.T) {
 		t.Fatalf("not persisted: %+v", got.Rule)
 	}
 }
+
+func TestOffHours(t *testing.T) {
+	h := newHarness(t)
+	now := time.Now().UTC()
+	// A one-minute window that's never now: it starts two hours from now.
+	from := now.Add(2 * time.Hour).Format("15:04")
+	to := now.Add(2*time.Hour + time.Minute).Format("15:04")
+	sc, err := h.st.CreateSchedule(context.Background(), rules.Schedule{Name: "later", Timezone: "UTC", Windows: []rules.Window{{From: from, To: to}}}, store.Editor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.rule(rules.Rule{ScheduleID: sc.ID})
+	if got := h.fire(); got != store.RunOffHours {
+		t.Fatalf("status = %s, want offhours", got)
+	}
+	if h.hits.Load() != 0 {
+		t.Fatal("off-hours rule called its target")
+	}
+}
+
+func TestOnFailureActions(t *testing.T) {
+	var got atomic.Value
+	alert := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.URL.Query().Get("msg"))
+	}))
+	defer alert.Close()
+
+	h := newHarness(t)
+	r := rules.Rule{Name: "fails", Enabled: true, Trigger: rules.Trigger{Codes: []string{"vmd"}},
+		Actions: []rules.Action{{Type: rules.ActionHTTP, Name: "Broken cam", URL: "http://127.0.0.1:1/x", TimeoutSeconds: 2}},
+		OnFailure: []rules.Action{{Type: rules.ActionHTTP, Name: "Alert",
+			URL: alert.URL + "/?msg={{ urlquery .failure.step }}+{{ .failure.stepNumber }}+{{ .rule }}"}},
+	}
+	created, err := h.st.CreateRule(context.Background(), r, store.Editor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := yoursix.Sample("device", "vmd")
+	raw, _ := json.Marshal(ev)
+	res, err := h.eng.Dispatch(context.Background(), ev, raw, "test", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.waitIdle(created.ID)
+	e, err := h.st.GetEvent(context.Background(), res.EventRow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := e.Runs[0]
+	if run.Status != store.RunFailed || len(run.Steps) != 2 || !run.Steps[1].OnFailure || !run.Steps[1].OK || run.Steps[1].Index != 1 {
+		t.Fatalf("run: %+v", run)
+	}
+	if msg, _ := got.Load().(string); msg != "Broken cam 1 fails" {
+		t.Fatalf("alert got %q", msg)
+	}
+}
