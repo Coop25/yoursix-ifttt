@@ -181,7 +181,11 @@ function actionSummary(a) {
   const label = a.name ? `${a.name}: ` : "";
   if (a.type === "http") return `${label}${a.method || "GET"} ${a.url}${a.auth ? ` (${a.auth} auth)` : ""}`;
   if (a.type === "delay") return `${label}wait ${a.delayMillis} ms`;
-  if (a.type === "discord") return `${label}Discord: ${a.message}`;
+  if (a.type === "discord") {
+    const n = a.discord?.embeds?.length || 0;
+    const extras = [n ? `${n} embed${n === 1 ? "" : "s"}` : "", a.discord?.pingUsers?.length || a.discord?.pingRoles?.length ? "pings" : "", a.discord?.silent ? "silent" : ""].filter(Boolean);
+    return `${label}Discord: ${a.message || a.discord?.embeds?.[0]?.title || ""}${extras.length ? ` (${extras.join(", ")})` : ""}`;
+  }
   if (a.type === "request") {
     const sr = (state.requests || []).find((r) => r.id === a.requestId);
     const params = Object.entries(a.params || {}).map(([k, v]) => `${k}=${v}`).join(", ");
@@ -509,13 +513,7 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
       field("Name", inp("name", { placeholder: "optional label" })),
       field("Delay (ms)", inp("delayMillis", { type: "number", min: 1, max: 600000 })));
   } else if (a.type === "discord") {
-    const msg = h("textarea", { "data-k": "message", rows: 2 });
-    msg.value = a.message || "";
-    grid = h("div.action-grid", {},
-      field("Name", inp("name", { placeholder: "optional label" })),
-      field("Webhook URL", inp("webhookUrl", { placeholder: "blank = Y6IFTTT_DISCORD_WEBHOOK_URL" })),
-      field("Message", msg),
-      field("Options", h("label.inline", {}, h("input", { type: "checkbox", "data-k": "continueOnError", checked: !!a.continueOnError }), "Continue on error")));
+    grid = discordActionGrid(a, inp);
   } else if (a.type === "request") {
     grid = requestActionGrid(a, inp);
   } else {
@@ -525,6 +523,125 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
   box.append(head, grid);
   container.append(box);
   return box;
+}
+
+// discordActionGrid is the form for a "discord" action. Its extra webhook
+// properties live under a.discord (inputs tagged data-dk); embeds are
+// .embed-box elements (data-ek) with .embed-field rows (data-fk).
+function discordActionGrid(a, inp) {
+  const d = a.discord || {};
+  const msg = h("textarea", { "data-k": "message", rows: 2, placeholder: "Optional if you add an embed" });
+  msg.value = a.message || "";
+  const dinp = (k, attrs = {}) => h("input", { "data-dk": k, value: d[k] ?? "", ...attrs });
+  const dchk = (k, label, title) => h("label.inline", { title }, h("input", { type: "checkbox", "data-dk": k, checked: !!d[k] }), label);
+
+  const embeds = h("div.embeds", {});
+  for (const e of d.embeds || []) embeds.append(embedBox(e));
+  const addEmbed = h("button.btn.small", { type: "button", onclick: () => embeds.append(embedBox({})) }, "+ Embed");
+
+  const more = h("details.discord-more", { open: !!(d.username || d.avatarUrl || d.threadId || d.threadName) },
+    h("summary", {}, "Sender & thread"),
+    h("div.action-grid", {},
+      field("Username", dinp("username", { placeholder: "blank = the webhook's name" })),
+      field("Avatar URL", dinp("avatarUrl", { placeholder: "https://… (blank = the webhook's avatar)" })),
+      field("Thread ID", dinp("threadId", { placeholder: "post into an existing thread" })),
+      field("Thread name", dinp("threadName", { placeholder: "forum channels: start a new post with this title" }))));
+
+  return h("div.action-grid", {},
+    field("Name", inp("name", { placeholder: "optional label" })),
+    field("Webhook URL", inp("webhookUrl", { placeholder: "blank = Y6IFTTT_DISCORD_WEBHOOK_URL" })),
+    field("Message", msg),
+    field("Ping users", dinp("pingUsers", { value: (d.pingUsers || []).join(", "), placeholder: "user IDs, comma-separated (right-click › Copy User ID)" })),
+    field("Ping roles", dinp("pingRoles", { value: (d.pingRoles || []).join(", "), placeholder: "role IDs, comma-separated" })),
+    field("Options", h("div.row", {},
+      dchk("pingEveryone", "Allow @everyone / @here", "Otherwise @everyone and @here in the message don't ping"),
+      dchk("silent", "Silent", "Post without a push or desktop notification"),
+      dchk("tts", "Text-to-speech"),
+      h("label.inline", {}, h("input", { type: "checkbox", "data-k": "continueOnError", checked: !!a.continueOnError }), "Continue on error"))),
+    h("div.full", {}, more),
+    field("Embeds", h("div", {}, embeds, addEmbed)),
+  );
+}
+
+const EVENT_TIME = "{{ .event.eventOccurred }}";
+
+function embedBox(e) {
+  const box = h("div.embed-box", {});
+  const einp = (k, attrs = {}) => h("input", { "data-ek": k, value: e[k] ?? "", ...attrs });
+  const desc = h("textarea", { "data-ek": "description", rows: 2 });
+  desc.value = e.description || "";
+
+  // A text field (so templates and blanks work) with a picker beside it.
+  const color = einp("color", { placeholder: "#5865F2", class: "color-text" });
+  const picker = h("input", { type: "color", value: /^#?[0-9a-f]{6}$/i.test(e.color || "") ? "#" + e.color.replace("#", "") : "#5865f2" });
+  const syncBar = () => { box.style.borderLeftColor = /^#?[0-9a-f]{6}$/i.test(color.value.trim()) ? "#" + color.value.trim().replace("#", "") : ""; };
+  picker.addEventListener("input", () => { color.value = picker.value; syncBar(); });
+  color.addEventListener("input", () => { if (/^#?[0-9a-f]{6}$/i.test(color.value.trim())) picker.value = "#" + color.value.trim().replace("#", ""); syncBar(); });
+  syncBar();
+
+  const ts = einp("timestamp", { placeholder: EVENT_TIME });
+  const fields = h("div.embed-fields", {});
+  for (const f of e.fields || []) fields.append(embedFieldRow(f));
+
+  box.append(
+    h("div.action-head", {}, h("strong", {}, "Embed"), h("button.btn.small.danger", { type: "button", onclick: () => box.remove() }, "✕")),
+    h("div.action-grid", {},
+      field("Title", einp("title")),
+      field("Title link", einp("url", { placeholder: "https://…" })),
+      field("Description", desc),
+      field("Color", h("div.row", {}, picker, color)),
+      field("Timestamp", h("div.row", {}, ts, h("button.btn.small", { type: "button", onclick: () => { ts.value = EVENT_TIME; } }, "Event time"))),
+      field("Fields", h("div", {}, fields, h("button.btn.small", { type: "button", onclick: () => fields.append(embedFieldRow({})) }, "+ Field"))),
+    ),
+    h("details.discord-more", { open: !!(e.authorName || e.footerText || e.thumbnailUrl || e.imageUrl) },
+      h("summary", {}, "Author, footer & images"),
+      h("div.action-grid", {},
+        field("Author", einp("authorName", { placeholder: "name" })),
+        field("Author link", einp("authorUrl", { placeholder: "https://…" })),
+        field("Author icon", einp("authorIconUrl", { placeholder: "image URL" })),
+        field("Footer", einp("footerText")),
+        field("Footer icon", einp("footerIconUrl", { placeholder: "image URL" })),
+        field("Thumbnail", einp("thumbnailUrl", { placeholder: "image URL (small, top right)" })),
+        field("Image", einp("imageUrl", { placeholder: "image URL (large, bottom)" })))),
+  );
+  return box;
+}
+
+function embedFieldRow(f) {
+  const row = h("div.embed-field", {},
+    h("input", { "data-fk": "name", value: f.name || "", placeholder: "Name" }),
+    h("input", { "data-fk": "value", value: f.value || "", placeholder: "Value" }),
+    h("label.inline", {}, h("input", { type: "checkbox", "data-fk": "inline", checked: !!f.inline }), "Inline"),
+    h("button.btn.small.danger", { type: "button", onclick: () => row.remove() }, "✕"));
+  return row;
+}
+
+// readDiscord collects a discord action's options, or undefined if none are set.
+function readDiscord(box) {
+  const d = {};
+  const read = (el, k, obj) => {
+    if (el.type === "checkbox") { if (el.checked) obj[k] = true; } else if (el.value.trim() !== "") obj[k] = el.value;
+  };
+  for (const el of $$("[data-dk]", box)) {
+    const k = el.dataset.dk;
+    if (k === "pingUsers" || k === "pingRoles") {
+      const ids = el.value.split(/[\s,]+/).filter(Boolean);
+      if (ids.length) d[k] = ids;
+    } else read(el, k, d);
+  }
+  const embeds = $$(".embed-box", box).map((eb) => {
+    const e = {};
+    for (const el of $$("[data-ek]", eb)) read(el, el.dataset.ek, e);
+    const fields = $$(".embed-field", eb).map((row) => {
+      const f = {};
+      for (const el of $$("[data-fk]", row)) read(el, el.dataset.fk, f);
+      return f;
+    }).filter((f) => f.name || f.value);
+    if (fields.length) e.fields = fields;
+    return e;
+  });
+  if (embeds.length) d.embeds = embeds;
+  return Object.keys(d).length ? d : undefined;
 }
 
 // requestActionGrid is the form for a "request" action: pick a saved request,
@@ -598,6 +715,10 @@ function readAction(box) {
     const params = {};
     for (const el of $$("[data-param]", box)) if (el.value !== "") params[el.dataset.param] = el.value;
     if (Object.keys(params).length) a.params = params;
+  }
+  if (a.type === "discord") {
+    const d = readDiscord(box);
+    if (d) a.discord = d;
   }
   return a;
 }

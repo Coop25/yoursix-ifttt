@@ -425,7 +425,7 @@
     for (const [i, a] of r.actions.entries()) {
       if (a.type === "http" && !a.url) return `action ${i + 1}: url is required`;
       if (a.type === "delay" && !(a.delayMillis > 0)) return `action ${i + 1}: delayMillis must be between 1 and 600000`;
-      if (a.type === "discord" && !a.message) return `action ${i + 1}: message is required`;
+      if (a.type === "discord" && !a.message && !a.discord?.embeds?.length) return `action ${i + 1}: a message or an embed is required`;
       if (a.type === "request") {
         const sr = S.requests.find((x) => x.id === a.requestId);
         if (!sr) return `action ${i + 1}: choose a saved request`;

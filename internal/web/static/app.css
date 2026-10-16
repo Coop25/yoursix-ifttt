@@ -216,3 +216,16 @@ span.progress { display: inline-flex; align-items: center; gap: 4px; font-varian
 .card.rule-card.clickable:hover { background: color-mix(in srgb, var(--chip) 45%, var(--panel)); }
 .card.rule-card.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .card.rule-card.clickable :is(.actions-list, .summary) { cursor: pointer; }
+/* Discord action: collapsible extras and rich embeds. */
+.discord-more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.discord-more[open] summary { margin-bottom: 8px; }
+.embeds { display: grid; gap: 8px; margin-bottom: 8px; }
+.embed-box { display: grid; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--border); border-radius: 6px; padding: 10px; }
+.embed-fields { display: grid; gap: 6px; margin-bottom: 6px; }
+.embed-field { display: grid; grid-template-columns: 1fr 2fr auto auto; gap: 8px; align-items: center; }
+.embed-box input[type="color"] { width: 40px; height: 32px; padding: 2px; flex: none; cursor: pointer; }
+.embed-box .row > input:not([type]) { flex: 1; min-width: 0; }
+@media (max-width: 640px) {
+  .embed-field { grid-template-columns: 1fr auto auto; }
+  .embed-field input[data-fk="name"] { grid-column: 1 / -1; }
+}

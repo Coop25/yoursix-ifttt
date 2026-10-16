@@ -105,13 +105,146 @@ type Action struct {
 	DelayMillis int `json:"delayMillis,omitempty"`
 
 	// discord (webhook URL may also come from Y6IFTTT_DISCORD_WEBHOOK_URL)
-	WebhookURL string `json:"webhookUrl,omitempty"` // templated
-	Message    string `json:"message,omitempty"`    // templated
+	WebhookURL string          `json:"webhookUrl,omitempty"` // templated
+	Message    string          `json:"message,omitempty"`    // templated
+	Discord    *DiscordOptions `json:"discord,omitempty"`
 
 	// request: a SavedRequest plus values for its parameters. Values are
 	// templated with event data but may not use secrets.
 	RequestID int64             `json:"requestId,omitempty"`
 	Params    map[string]string `json:"params,omitempty"`
+}
+
+// Templates returns the action's templated strings, except saved request
+// parameter values.
+func (a Action) Templates() []string {
+	out := []string{a.URL, a.Body, a.Password, a.WebhookURL, a.Message}
+	for _, v := range a.Headers {
+		out = append(out, v)
+	}
+	if d := a.Discord; d != nil {
+		out = append(out, d.Username, d.AvatarURL, d.ThreadName)
+		for _, e := range d.Embeds {
+			out = append(out, e.Templates()...)
+		}
+	}
+	return out
+}
+
+// DiscordOptions are the optional webhook properties of a "discord" action.
+// See https://discord.com/developers/docs/resources/webhook#execute-webhook.
+type DiscordOptions struct {
+	Username  string `json:"username,omitempty"`  // templated; overrides the webhook's name
+	AvatarURL string `json:"avatarUrl,omitempty"` // templated; overrides the webhook's avatar
+	TTS       bool   `json:"tts,omitempty"`
+	// Silent posts without a push or desktop notification.
+	Silent bool `json:"silent,omitempty"`
+	// ThreadID posts into an existing thread; ThreadName creates a forum post.
+	ThreadID   string `json:"threadId,omitempty"`
+	ThreadName string `json:"threadName,omitempty"` // templated
+	// Mentions are blocked unless listed here. Listed users and roles are
+	// pinged, and added to the start of the message if it doesn't mention them.
+	PingUsers    []string `json:"pingUsers,omitempty"`
+	PingRoles    []string `json:"pingRoles,omitempty"`
+	PingEveryone bool     `json:"pingEveryone,omitempty"` // allow @everyone and @here in the message
+	Embeds       []Embed  `json:"embeds,omitempty"`
+}
+
+// Embed is a Discord rich embed. Every string is templated.
+type Embed struct {
+	Title       string `json:"title,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Description string `json:"description,omitempty"`
+	// Color is a hex colour like "#5865F2".
+	Color string `json:"color,omitempty"`
+	// Timestamp is shown in the footer; must render to RFC 3339, e.g.
+	// {{ .event.eventOccurred }}.
+	Timestamp     string       `json:"timestamp,omitempty"`
+	AuthorName    string       `json:"authorName,omitempty"`
+	AuthorURL     string       `json:"authorUrl,omitempty"`
+	AuthorIconURL string       `json:"authorIconUrl,omitempty"`
+	FooterText    string       `json:"footerText,omitempty"`
+	FooterIconURL string       `json:"footerIconUrl,omitempty"`
+	ThumbnailURL  string       `json:"thumbnailUrl,omitempty"`
+	ImageURL      string       `json:"imageUrl,omitempty"`
+	Fields        []EmbedField `json:"fields,omitempty"`
+}
+
+// EmbedField is one name/value pair in an embed.
+type EmbedField struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Inline bool   `json:"inline,omitempty"`
+}
+
+// Templates returns the embed's templated strings.
+func (e Embed) Templates() []string {
+	out := []string{e.Title, e.URL, e.Description, e.Timestamp, e.AuthorName, e.AuthorURL, e.AuthorIconURL,
+		e.FooterText, e.FooterIconURL, e.ThumbnailURL, e.ImageURL}
+	for _, f := range e.Fields {
+		out = append(out, f.Name, f.Value)
+	}
+	return out
+}
+
+var (
+	discordID  = regexp.MustCompile(`^\d{5,25}$`)
+	embedColor = regexp.MustCompile(`^#?[0-9a-fA-F]{6}$`)
+)
+
+func (d *DiscordOptions) validate() error {
+	d.ThreadID = strings.TrimSpace(d.ThreadID)
+	if d.ThreadID != "" && !discordID.MatchString(d.ThreadID) {
+		return errors.New("thread ID must be a Discord ID (digits only)")
+	}
+	if d.ThreadID != "" && strings.TrimSpace(d.ThreadName) != "" {
+		return errors.New("set either a thread ID or a thread name, not both")
+	}
+	for _, ids := range []*[]string{&d.PingUsers, &d.PingRoles} {
+		kept := (*ids)[:0]
+		for _, id := range *ids {
+			id = strings.Trim(strings.TrimSpace(id), "<@&!>")
+			if id == "" {
+				continue
+			}
+			if !discordID.MatchString(id) {
+				return fmt.Errorf("%q isn't a Discord ID (right-click a user or role › Copy ID)", id)
+			}
+			kept = append(kept, id)
+		}
+		*ids = kept
+	}
+	if len(d.PingUsers) > 100 || len(d.PingRoles) > 100 {
+		return errors.New("at most 100 users and 100 roles can be pinged")
+	}
+	if len(d.Embeds) > 10 {
+		return errors.New("at most 10 embeds")
+	}
+	for i := range d.Embeds {
+		e := &d.Embeds[i]
+		e.Color = strings.TrimSpace(e.Color)
+		if e.Color != "" && !embedColor.MatchString(e.Color) {
+			return fmt.Errorf("embed %d: color must be hex like #5865F2", i+1)
+		}
+		if len(e.Fields) > 25 {
+			return fmt.Errorf("embed %d: at most 25 fields", i+1)
+		}
+		empty := true
+		for _, s := range e.Templates() {
+			if strings.TrimSpace(s) != "" {
+				empty = false
+			}
+		}
+		if empty {
+			return fmt.Errorf("embed %d is empty", i+1)
+		}
+		for j, f := range e.Fields {
+			if strings.TrimSpace(f.Name) == "" || strings.TrimSpace(f.Value) == "" {
+				return fmt.Errorf("embed %d, field %d: name and value are required", i+1, j+1)
+			}
+		}
+	}
+	return nil
 }
 
 // Validate normalises the rule in place and reports the first problem.
@@ -185,8 +318,13 @@ func (a *Action) validate() error {
 			return errors.New("delayMillis must be between 1 and 600000")
 		}
 	case ActionDiscord:
-		if strings.TrimSpace(a.Message) == "" {
-			return errors.New("message is required")
+		if a.Discord != nil {
+			if err := a.Discord.validate(); err != nil {
+				return err
+			}
+		}
+		if strings.TrimSpace(a.Message) == "" && (a.Discord == nil || len(a.Discord.Embeds) == 0) {
+			return errors.New("a message or an embed is required")
 		}
 	case ActionRequest:
 		if a.RequestID <= 0 {

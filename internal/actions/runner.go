@@ -16,6 +16,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -282,17 +283,20 @@ func (r *Runner) runDiscord(ctx context.Context, a rules.Action, data map[string
 	if err != nil {
 		return fmt.Errorf("webhook template: %w", err)
 	}
-	msg, err := Render(a.Message, data, lk)
+	payload, threadID, err := discordPayload(a, data, lk)
 	if err != nil {
-		return fmt.Errorf("message template: %w", err)
+		return err
 	}
-	if len(msg) > 2000 {
-		msg = msg[:2000]
+	if threadID != "" {
+		u, err := url.Parse(hook)
+		if err != nil {
+			return fmt.Errorf("webhook URL: %w", err)
+		}
+		q := u.Query()
+		q.Set("thread_id", threadID)
+		u.RawQuery = q.Encode()
+		hook = u.String()
 	}
-	payload, _ := json.Marshal(map[string]any{
-		"content":          msg,
-		"allowed_mentions": map[string]any{"parse": []string{}},
-	})
 	res.Target = "discord webhook"
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -316,6 +320,162 @@ func (r *Runner) runDiscord(ctx context.Context, a rules.Action, data map[string
 	return nil
 }
 
+// discordFlagSuppressNotifications posts a message without notifying anyone.
+const discordFlagSuppressNotifications = 1 << 12
+
+// discordPayload renders a discord action into the webhook's JSON body, and
+// returns the thread to post into, if any. Text is cut to Discord's limits.
+func discordPayload(a rules.Action, data map[string]any, lk SecretLookup) ([]byte, string, error) {
+	var firstErr error
+	render := func(what, s string, limit int) string {
+		if firstErr != nil || s == "" {
+			return ""
+		}
+		out, err := Render(s, data, lk)
+		if err != nil {
+			firstErr = fmt.Errorf("%s template: %w", what, err)
+			return ""
+		}
+		return truncate(strings.TrimSpace(out), limit)
+	}
+
+	d := a.Discord
+	if d == nil {
+		d = &rules.DiscordOptions{}
+	}
+	content := render("message", a.Message, 2000)
+	var prefix []string
+	for _, id := range d.PingUsers {
+		if !strings.Contains(content, "<@"+id+">") && !strings.Contains(content, "<@!"+id+">") {
+			prefix = append(prefix, "<@"+id+">")
+		}
+	}
+	for _, id := range d.PingRoles {
+		if !strings.Contains(content, "<@&"+id+">") {
+			prefix = append(prefix, "<@&"+id+">")
+		}
+	}
+	if len(prefix) > 0 {
+		content = truncate(strings.TrimSpace(strings.Join(prefix, " ")+" "+content), 2000)
+	}
+
+	mentions := map[string]any{"parse": []string{}}
+	if d.PingEveryone {
+		mentions["parse"] = []string{"everyone"}
+	}
+	if len(d.PingUsers) > 0 {
+		mentions["users"] = d.PingUsers
+	}
+	if len(d.PingRoles) > 0 {
+		mentions["roles"] = d.PingRoles
+	}
+	body := map[string]any{"allowed_mentions": mentions}
+	if content != "" {
+		body["content"] = content
+	}
+	if v := render("username", d.Username, 80); v != "" {
+		body["username"] = v
+	}
+	if v := render("avatar URL", d.AvatarURL, 2048); v != "" {
+		body["avatar_url"] = v
+	}
+	if v := render("thread name", d.ThreadName, 100); v != "" {
+		body["thread_name"] = v
+	}
+	if d.TTS {
+		body["tts"] = true
+	}
+	if d.Silent {
+		body["flags"] = discordFlagSuppressNotifications
+	}
+
+	var embeds []map[string]any
+	for i, e := range d.Embeds {
+		what := func(f string) string { return fmt.Sprintf("embed %d %s", i+1, f) }
+		em := map[string]any{}
+		set := func(m map[string]any, k, v string) {
+			if v != "" {
+				m[k] = v
+			}
+		}
+		set(em, "title", render(what("title"), e.Title, 256))
+		set(em, "url", render(what("URL"), e.URL, 2048))
+		set(em, "description", render(what("description"), e.Description, 4096))
+		if e.Color != "" {
+			if n, err := strconv.ParseUint(strings.TrimPrefix(e.Color, "#"), 16, 32); err == nil {
+				em["color"] = n
+			}
+		}
+		if ts := render(what("timestamp"), e.Timestamp, 64); ts != "" {
+			t, err := time.Parse(time.RFC3339, ts)
+			if err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("embed %d timestamp %q isn't an RFC 3339 time", i+1, ts)
+			}
+			em["timestamp"] = t.UTC().Format(time.RFC3339)
+		}
+		author := map[string]any{}
+		set(author, "name", render(what("author name"), e.AuthorName, 256))
+		set(author, "url", render(what("author URL"), e.AuthorURL, 2048))
+		set(author, "icon_url", render(what("author icon"), e.AuthorIconURL, 2048))
+		if author["name"] != nil {
+			em["author"] = author
+		}
+		footer := map[string]any{}
+		set(footer, "text", render(what("footer"), e.FooterText, 2048))
+		set(footer, "icon_url", render(what("footer icon"), e.FooterIconURL, 2048))
+		if footer["text"] != nil {
+			em["footer"] = footer
+		}
+		if v := render(what("thumbnail"), e.ThumbnailURL, 2048); v != "" {
+			em["thumbnail"] = map[string]any{"url": v}
+		}
+		if v := render(what("image"), e.ImageURL, 2048); v != "" {
+			em["image"] = map[string]any{"url": v}
+		}
+		var fields []map[string]any
+		for j, f := range e.Fields {
+			fw := func(p string) string { return what(fmt.Sprintf("field %d %s", j+1, p)) }
+			fields = append(fields, map[string]any{
+				// Discord rejects empty names and values, e.g. from missing event data.
+				"name":   orBlank(render(fw("name"), f.Name, 256)),
+				"value":  orBlank(render(fw("value"), f.Value, 1024)),
+				"inline": f.Inline,
+			})
+		}
+		if fields != nil {
+			em["fields"] = fields
+		}
+		embeds = append(embeds, em)
+	}
+	if embeds != nil {
+		body["embeds"] = embeds
+	}
+	if firstErr != nil {
+		return nil, "", firstErr
+	}
+	if content == "" && embeds == nil {
+		return nil, "", errors.New("the message rendered empty and there are no embeds")
+	}
+	payload, err := json.Marshal(body)
+	return payload, d.ThreadID, err
+}
+
+// truncate cuts s to at most n characters (runes).
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
+}
+
+func orBlank(s string) string {
+	if s == "" {
+		return "​"
+	}
+	return s
+}
+
 func drain(resp *http.Response) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	_ = resp.Body.Close()
@@ -324,10 +484,7 @@ func drain(resp *http.Response) {
 // CheckTemplates validates every templated field of a rule's actions.
 func CheckTemplates(actions []rules.Action) error {
 	for i, a := range actions {
-		fields := []string{a.URL, a.Body, a.Password, a.WebhookURL, a.Message}
-		for _, v := range a.Headers {
-			fields = append(fields, v)
-		}
+		fields := a.Templates()
 		for _, v := range a.Params {
 			fields = append(fields, v)
 		}
@@ -361,11 +518,7 @@ func redact(res *StepResult, values []string) {
 func SecretRefs(actions []rules.Action) ([]string, error) {
 	seen := map[string]struct{}{}
 	for i, a := range actions {
-		fields := []string{a.URL, a.Body, a.Password, a.WebhookURL, a.Message}
-		for _, v := range a.Headers {
-			fields = append(fields, v)
-		}
-		for _, f := range fields {
+		for _, f := range a.Templates() {
 			names, err := SecretNames(f)
 			if err != nil {
 				return nil, fmt.Errorf("action %d: %w", i+1, err)

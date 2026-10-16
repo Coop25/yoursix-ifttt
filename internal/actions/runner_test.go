@@ -127,6 +127,94 @@ func TestDiscordAction(t *testing.T) {
 	}
 }
 
+func TestDiscordOptionsAndEmbeds(t *testing.T) {
+	var got map[string]any
+	var query string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	ev := yoursix.Sample(yoursix.TopicDevice, "vmd")
+	a := rules.Action{Type: rules.ActionDiscord, Message: "Motion", Discord: &rules.DiscordOptions{
+		Username: "{{ .data.siteName }} cams", Silent: true, ThreadID: "123456789012345678",
+		PingUsers: []string{"<@111111111111111111>"}, PingRoles: []string{"222222222222222222"},
+		Embeds: []rules.Embed{{
+			Title: "{{ .data.deviceName }}", Color: "#ff0000", Timestamp: "{{ .event.eventOccurred }}",
+			FooterText: "YourSix",
+			Fields:     []rules.EmbedField{{Name: "Site", Value: "{{ .data.siteName }}", Inline: true}, {Name: "Blank", Value: `{{ "" }}`}},
+		}},
+	}}
+	r := rules.Rule{Name: "r", Actions: []rules.Action{a}}
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckTemplates(r.Actions); err != nil {
+		t.Fatal(err)
+	}
+	steps, ok := NewRunner(srv.URL, "test").Run(context.Background(), r.Actions, ev.TemplateData("r"), nil)
+	if !ok {
+		t.Fatalf("discord action failed: %+v", steps)
+	}
+	if query != "thread_id=123456789012345678" {
+		t.Errorf("query = %q", query)
+	}
+	if got["content"] != "<@111111111111111111> <@&222222222222222222> Motion" {
+		t.Errorf("content = %v", got["content"])
+	}
+	if got["username"] != ev.EventData["siteName"].(string)+" cams" || got["flags"] != float64(4096) {
+		t.Errorf("username/flags = %v / %v", got["username"], got["flags"])
+	}
+	am := got["allowed_mentions"].(map[string]any)
+	if len(am["parse"].([]any)) != 0 || am["users"].([]any)[0] != "111111111111111111" || am["roles"].([]any)[0] != "222222222222222222" {
+		t.Errorf("allowed_mentions = %v", am)
+	}
+	em := got["embeds"].([]any)[0].(map[string]any)
+	if em["title"] != "CAM-01" || em["color"] != float64(0xff0000) || em["timestamp"] == nil {
+		t.Errorf("embed = %v", em)
+	}
+	if em["footer"].(map[string]any)["text"] != "YourSix" {
+		t.Errorf("footer = %v", em["footer"])
+	}
+	fields := em["fields"].([]any)
+	if fields[0].(map[string]any)["inline"] != true || fields[1].(map[string]any)["value"] != "​" {
+		t.Errorf("fields = %v", fields)
+	}
+}
+
+func TestDiscordValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		a    rules.Action
+		want string
+	}{
+		{"nothing to send", rules.Action{Type: rules.ActionDiscord}, "message or an embed"},
+		{"embed only ok", rules.Action{Type: rules.ActionDiscord, Discord: &rules.DiscordOptions{Embeds: []rules.Embed{{Title: "x"}}}}, ""},
+		{"empty embed", rules.Action{Type: rules.ActionDiscord, Discord: &rules.DiscordOptions{Embeds: []rules.Embed{{}}}}, "empty"},
+		{"bad color", rules.Action{Type: rules.ActionDiscord, Message: "m", Discord: &rules.DiscordOptions{Embeds: []rules.Embed{{Title: "x", Color: "red"}}}}, "color"},
+		{"bad user id", rules.Action{Type: rules.ActionDiscord, Message: "m", Discord: &rules.DiscordOptions{PingUsers: []string{"frank"}}}, "Discord ID"},
+		{"thread both", rules.Action{Type: rules.ActionDiscord, Message: "m", Discord: &rules.DiscordOptions{ThreadID: "123456789", ThreadName: "x"}}, "not both"},
+	}
+	for _, c := range cases {
+		r := rules.Rule{Name: "r", Actions: []rules.Action{c.a}}
+		err := r.Validate()
+		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+			t.Errorf("%s: err = %v, want %q", c.name, err, c.want)
+		}
+	}
+}
+
+func TestDiscordSecretRefsIncludeEmbeds(t *testing.T) {
+	names, err := SecretRefs([]rules.Action{{Type: rules.ActionDiscord, Discord: &rules.DiscordOptions{
+		Embeds: []rules.Embed{{Fields: []rules.EmbedField{{Name: "k", Value: `{{ secret "TOKEN" }}`}}}},
+	}}})
+	if err != nil || len(names) != 1 || names[0] != "TOKEN" {
+		t.Fatalf("names = %v, err = %v", names, err)
+	}
+}
+
 func TestHTTPErrorsAreExplained(t *testing.T) {
 	// Accept connections but never answer, to force a timeout.
 	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

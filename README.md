@@ -66,10 +66,26 @@ A rule has an **If** part, a list of **Then** actions, and an optional cooldown.
 |---|---|
 | `http` | Any method, URL, headers and body. Auth can be none, `basic`, or `digest` (Axis VAPIX default). Optional self-signed TLS, custom expected status codes, and a timeout. |
 | `delay` | Waits N ms between steps. |
-| `discord` | Posts a message to a Discord webhook. |
+| `discord` | Posts a message and/or rich embeds to a Discord webhook (see below). |
 | `request` | Runs a **saved request** (see below) with values for its parameters. |
 
 By default a failing action stops the rule. Set `continueOnError` on an action to keep going after it fails.
+
+**Discord options.** Besides the message, a `discord` action can set:
+
+- **Ping users / Ping roles:** Discord IDs to mention. Mentions are blocked unless listed here, so a stray `@everyone` in event data can't ping anyone. Listed IDs are added to the start of the message if it doesn't mention them already. Pinging yourself in a private channel is an easy way to get a phone notification. **Allow @everyone / @here** turns those on.
+- **Silent** (no push notification) and **Text-to-speech**.
+- **Sender & thread:** override the webhook's username and avatar, post into a thread by ID, or start a forum post with a thread name.
+- **Embeds** (up to 10): title and link, description, colour, timestamp (**Event time** fills in `{{ .event.eventOccurred }}`), author, footer, thumbnail, image, and name/value fields (inline or not).
+
+Every text field is templated. Text longer than Discord's limits is cut short. In JSON these options go under `"discord"`:
+
+```json
+{ "type": "discord", "message": "Motion!", "discord": {
+    "pingUsers": ["123456789012345678"], "username": "{{ .data.siteName }}",
+    "embeds": [{ "title": "{{ .data.deviceName }}", "color": "#e5484d", "timestamp": "{{ .event.eventOccurred }}",
+                 "fields": [{ "name": "Site", "value": "{{ .data.siteName }}", "inline": true }] }] } }
+```
 
 While a rule runs, the UI shows it live:
 
