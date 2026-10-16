@@ -35,6 +35,7 @@ async function api(method, path, body) {
   if (!res.ok) {
     const err = new Error(data.error || gatewayMessage(res.status) || `HTTP ${res.status}`);
     err.status = res.status;
+    err.data = data;
     throw err;
   }
   return data;
@@ -89,10 +90,20 @@ async function boot() {
   state.catalog = await api("GET", "/api/catalog");
   $("#field-list").append(...state.catalog.fields.map((f) => h("option", { value: f })));
 
-  $$("#tabs button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
+  $$("#tabs button").forEach((b) => b.addEventListener("click", () => {
+    if (b.dataset.tab === "history" && state.historyScope) {
+      // The tab itself shows everything, not the last item opened from a card.
+      state.historyScope = null;
+      $("#history-kind").value = "";
+    }
+    showTab(b.dataset.tab);
+  }));
   $("#new-rule").addEventListener("click", () => openEditor(null));
   $("#events-refresh").addEventListener("click", () => loadEvents());
   $("#events-more").addEventListener("click", () => loadEvents(true));
+  wireEventSearch();
+  wireHistory();
+  wireScheduleEditor();
   wireEditor();
   wireSetup();
   wireSecrets();
@@ -137,7 +148,7 @@ function renderMe() {
 }
 
 function showTab(tab) {
-  if (!["rules", "requests", "events", "setup", "secrets"].includes(tab) || (tab === "secrets" && !isAdmin())) tab = "rules";
+  if (!["rules", "requests", "schedules", "events", "history", "setup", "secrets"].includes(tab) || (tab === "secrets" && !isAdmin())) tab = "rules";
   if (location.hash !== `#${tab}`) history.replaceState(null, "", `#${tab}`);
   $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $$(".view").forEach((v) => v.classList.toggle("hidden", v.id !== `view-${tab}`));
@@ -151,13 +162,15 @@ function showTab(tab) {
     startLive();
     loadEvents();
   }
+  if (tab === "schedules") loadSchedules();
+  if (tab === "history") loadHistory();
   if (tab === "setup") loadSetup();
   if (tab === "secrets") loadSecrets();
 }
 
 // ---------- rules ----------
 async function loadRules() {
-  [state.rules, state.requests] = await Promise.all([api("GET", "/api/rules"), api("GET", "/api/requests")]);
+  [state.rules, state.requests, state.schedules] = await Promise.all([api("GET", "/api/rules"), api("GET", "/api/requests"), api("GET", "/api/schedules")]);
   state.rules.forEach((r) => (r.activeRuns || []).forEach(stampRun));
   const list = $("#rules-list");
   if (!state.rules.length) {
@@ -189,7 +202,7 @@ function actionSummary(a) {
   if (a.type === "request") {
     const sr = (state.requests || []).find((r) => r.id === a.requestId);
     const params = Object.entries(a.params || {}).map(([k, v]) => `${k}=${v}`).join(", ");
-    return `${label}Saved request: ${sr ? sr.name : `#${a.requestId} (missing)`}${params ? ` (${params})` : ""}`;
+    return `${label}Saved action: ${sr ? sr.name : `#${a.requestId} (missing)`}${params ? ` (${params})` : ""}`;
   }
   return label + a.type;
 }
@@ -199,15 +212,18 @@ function ruleCard(r) {
   const active = r.activeRuns || [];
   // Mark the rule's own action list with the first active run's position.
   const cur = active[0] && active[0].current;
-  const card = h("div.card.rule-card" + (r.enabled ? ".enabled" : ".disabled") + (active.length ? ".is-running" : "") + (admin ? ".clickable" : ""), {},
+  const card = h("div.card.rule-card" + (r.enabled ? ".enabled" : ".disabled") + (active.length ? ".is-running" : ""), {},
     h("div.card-head", {},
       h("h3", {}, r.name),
       r.enabled ? h("span.badge.ok", {}, "enabled") : h("span.badge", {}, "disabled"),
       active.length ? h("span.badge.running", {}, active.length > 1 ? `running ×${active.length}` : "running") : null,
       r.skipIfRunning ? h("span.badge", { title: "New events are ignored while a run is in progress" }, "one at a time") : null,
       r.cooldownSeconds ? h("span.badge", { title: `Ignores events for ${r.cooldownSeconds}s after the last run ${r.cooldownFrom === "finish" ? "finished" : "started"}` }, `once per ${fmtDuration(r.cooldownSeconds)}${r.cooldownFrom === "finish" ? " after finish" : ""}`) : null,
+      scheduleBadge(r.scheduleId),
+      r.onFailure?.length ? h("span.badge", { title: "Runs extra actions when a step fails" }, "handles failures") : null,
       h("span.muted.small", { title: fmtTime(r.lastFiredAt) }, `fired ${ago(r.lastFiredAt)}`),
       admin ? h("button.btn.small", { onclick: () => testRule(r) }, "Test") : null,
+      h("button.btn.small", { onclick: () => showHistory("rule", r.id, r.name) }, "History"),
       admin ? h("button.btn.small", { onclick: () => openEditor(r) }, "Edit") : null,
       admin ? h("button.btn.small.danger", { onclick: () => deleteRule(r) }, "Delete") : null,
     ),
@@ -217,27 +233,32 @@ function ruleCard(r) {
       ? h("p.muted.small", {}, `Saved by ${r.updatedByName}: runs with their secrets. Saving it yourself makes it yours.`)
       : null,
     h("ol.actions-list", {}, r.actions.map((a, i) => h("li" + (cur ? (i < cur.index ? ".step-done" : i === cur.index ? ".step-current" : "") : ""), {}, actionSummary(a)))),
+    r.onFailure?.length ? h("p.summary", {}, "If anything fails: ", r.onFailure.map(actionSummary).join("; ")) : null,
   );
   card.dataset.ruleId = r.id;
-  if (admin) {
-    // Click anywhere on the card to edit, except its buttons and links, or
-    // when the click finished a text selection. Enter/Space for keyboards.
-    card.tabIndex = 0;
-    card.setAttribute("aria-label", `${r.name}: ${r.enabled ? "enabled" : "disabled"}. Press Enter to edit.`);
-    card.title = "Click to edit";
-    card.addEventListener("click", (e) => {
-      if (e.target.closest("button, a, input, select, textarea, summary")) return;
-      if (String(window.getSelection())) return;
-      openEditor(r);
-    });
-    card.addEventListener("keydown", (e) => {
-      if (e.target === card && (e.key === "Enter" || e.key === " ")) {
-        e.preventDefault();
-        openEditor(r);
-      }
-    });
-  }
+  if (admin) clickToEdit(card, `${r.name}: ${r.enabled ? "enabled" : "disabled"}`, () => openEditor(r));
   return card;
+}
+
+// clickToEdit makes a whole card open its editor: click anywhere except its
+// buttons and links (or when the click finished a text selection), or focus
+// it and press Enter/Space.
+function clickToEdit(card, label, open) {
+  card.classList.add("clickable");
+  card.tabIndex = 0;
+  card.setAttribute("aria-label", `${label}. Press Enter to edit.`);
+  card.title = "Click to edit";
+  card.addEventListener("click", (e) => {
+    if (e.target.closest("button, a, input, select, textarea, summary")) return;
+    if (String(window.getSelection())) return;
+    open();
+  });
+  card.addEventListener("keydown", (e) => {
+    if (e.target === card && (e.key === "Enter" || e.key === " ")) {
+      e.preventDefault();
+      open();
+    }
+  });
 }
 
 async function deleteRule(r) {
@@ -311,16 +332,18 @@ async function pollRun(title, start, total, note = "") {
 
 function renderSteps(steps) {
   if (!steps || !steps.length) return h("p.muted", {}, "No steps recorded.");
-  return h("div", {}, steps.map((s) =>
+  const firstFailureStep = steps.findIndex((s) => s.onFailure);
+  return h("div", {}, steps.map((s, i) => [
+    i === firstFailureStep ? h("div.step-group", {}, "If anything fails") : null,
     h("div.step" + (s.skipped ? "" : s.ok ? ".ok" : ".bad"), {},
-      h("div", {}, h("strong", {}, `${s.index + 1}. ${s.name || s.type}`), " ",
+      h("div", {}, h("strong", {}, `${s.index + 1}. ${s.name || ACTION_LABELS[s.type] || s.type}`), " ",
         s.skipped ? h("span.badge", {}, "skipped") : h(`span.badge.${s.ok ? "ok" : "failed"}`, {}, s.ok ? "ok" : "failed"),
         s.status ? h("span.badge", {}, `HTTP ${s.status}`) : null,
-        h("span.muted.small", {}, ` ${s.durationMs} ms`)),
+        s.skipped ? null : h("span.muted.small", {}, ` ${s.durationMs || 0} ms`)),
       s.target ? h("div.muted.small", {}, s.target) : null,
       s.error ? h("div.error", {}, s.error) : null,
       s.response ? h("pre", {}, s.response) : null,
-    )));
+    )]));
 }
 
 function showResult(title, ...body) {
@@ -357,14 +380,19 @@ function cleanRule(r) {
     cooldownFrom: r.cooldownFrom || "start",
     skipIfRunning: !!r.skipIfRunning,
     trigger: { topics: r.trigger.topics || [], codes: r.trigger.codes || [], filters: r.trigger.filters || [] },
+    ...(r.scheduleId ? { scheduleId: Number(r.scheduleId) } : {}),
     actions: r.actions || [],
+    ...(r.onFailure && r.onFailure.length ? { onFailure: r.onFailure } : {}),
   };
 }
 
 function wireEditor() {
   guardEditor("rule", $("#editor"), $("#editor-cancel"), editorState);
   $("#add-filter").addEventListener("click", () => addFilterRow({ field: "deviceName", op: "equals", value: "" }));
-  $$("[data-add-action]").forEach((b) => b.addEventListener("click", () => addActionBox(blankAction(b.dataset.addAction))));
+  $$("[data-add-action]").forEach((b) => b.addEventListener("click", () => { addActionBox(blankAction(b.dataset.addAction)); schedulePreview(); }));
+  $$("[data-add-fail]").forEach((b) => b.addEventListener("click", () => { addActionBox(blankAction(b.dataset.addFail), $("#f-onfail")); schedulePreview(); }));
+  $("#f-schedule").addEventListener("change", showScheduleInfo);
+  wirePreview();
   $("#editor-json-mode").addEventListener("change", (e) => {
     const err = $("#editor-error");
     err.textContent = "";
@@ -392,21 +420,58 @@ function wireEditor() {
       err.textContent = "Invalid JSON: " + ex.message;
       return;
     }
-    try {
-      if (state.editing && state.editing.id) await api("PUT", `/api/rules/${state.editing.id}`, rule);
-      else await api("POST", "/api/rules", rule);
-      $("#editor").close();
-      loadRules();
-    } catch (ex) {
-      err.textContent = ex.message;
-    }
+    const save = async (expected) => {
+      err.textContent = "";
+      try {
+        if (state.editing && state.editing.id) await api("PUT", `/api/rules/${state.editing.id}`, { ...rule, ...(expected ? { updatedAt: expected } : {}) });
+        else await api("POST", "/api/rules", rule);
+        $("#editor").close();
+        loadRules();
+      } catch (ex) {
+        if (ex.status === 409 && ex.data?.conflict) {
+          showConflict(err, ex, state.editing, {
+            overwrite: () => save(ex.data.current.updatedAt),
+            reload: () => {
+              state.editing = ex.data.current;
+              $("#editor-json-mode").checked = false;
+              $("#editor-visual").classList.remove("hidden");
+              $("#editor-json").classList.add("hidden");
+              fillVisual(cleanRule(structuredClone(ex.data.current)));
+              guards.rule.snapshot();
+              err.replaceChildren();
+            },
+          });
+        } else err.textContent = ex.message;
+      }
+    };
+    // Saving sends the version this editor opened, so the server can refuse
+    // if someone else saved in between.
+    save(state.editing?.updatedAt);
   });
+}
+
+// showConflict explains that someone else saved the item after this editor
+// opened it, and offers to compare, overwrite with these edits, or load
+// their version (discarding these edits).
+function showConflict(errBox, ex, opened, { overwrite, reload }) {
+  const compare = () => showResult("What changed since you opened it",
+    h("p.muted.small", {}, "Red lines are the version you opened; green lines are what's saved now. Your unsaved edits aren't shown."),
+    ...diffView(pretty(contentOf(opened)), pretty(contentOf(ex.data.current)), false));
+  errBox.replaceChildren(h("div.conflict", {},
+    h("p", {}, h("strong", {}, "Not saved. "),
+      `${ex.data.current.updatedByName || "Someone else"} saved a newer version `,
+      h("span", { title: fmtTime(ex.data.current.updatedAt) }, ago(ex.data.current.updatedAt)),
+      ", after you opened this editor."),
+    h("div.row", {},
+      h("button.btn.small", { type: "button", onclick: compare }, "Show their changes"),
+      h("button.btn.small.danger", { type: "button", onclick: overwrite }, "Overwrite with mine"),
+      h("button.btn.small", { type: "button", onclick: reload }, "Load their version"))));
 }
 
 async function openEditor(rule) {
   state.editing = rule;
-  // Fresh list for the "Saved request" picker.
-  state.requests = await api("GET", "/api/requests");
+  // Fresh lists for the "Saved action" and schedule pickers.
+  [state.requests, state.schedules] = await Promise.all([api("GET", "/api/requests"), api("GET", "/api/schedules")]);
   $("#editor-title").textContent = rule ? `Edit: ${rule.name}` : "New rule";
   $("#editor-error").textContent = "";
   $("#editor-json-mode").checked = false;
@@ -424,37 +489,102 @@ function fillVisual(r) {
   $("#f-cooldown-from").value = r.cooldownFrom || "start";
   $("#f-skip-running").checked = !!r.skipIfRunning;
 
-  const topics = $("#f-topics");
-  topics.replaceChildren(...state.catalog.topics.map((t) =>
-    h("label.chip", {}, h("input", { type: "checkbox", value: t, checked: r.trigger.topics.includes(t), onchange: () => renderCodes(readCodes()) }), t)));
-  renderCodes(r.trigger.codes);
+  state.codePicker = pillPicker($("#f-codes"), {
+    placeholder: "Add an event code…", empty: "Any event code", warnUnknown: true,
+    options: () => {
+      const topics = selectedTopics();
+      return (topics.length ? topics : state.catalog.topics).map((t) => [t, state.catalog.codes[t] || []]);
+    },
+  });
+  state.topicPicker = pillPicker($("#f-topics"), {
+    placeholder: "Add a topic…", empty: "Any topic",
+    options: () => [[null, state.catalog.topics]],
+    onchange: () => state.codePicker.refresh(),
+  });
+  state.topicPicker.set(r.trigger.topics);
+  state.codePicker.set(r.trigger.codes);
 
   $("#f-filters").replaceChildren();
   r.trigger.filters.forEach((flt) => addFilterRow(flt));
   $("#f-actions").replaceChildren();
   r.actions.forEach((a) => addActionBox(a));
+  $("#f-onfail").replaceChildren();
+  (r.onFailure || []).forEach((a) => addActionBox(a, $("#f-onfail")));
+
+  const sel = $("#f-schedule");
+  const known = state.schedules || [];
+  sel.replaceChildren(h("option", { value: "" }, "Any time"),
+    ...known.map((s) => h("option", { value: s.id }, s.name)),
+    ...(r.scheduleId && !known.some((s) => s.id === r.scheduleId) ? [h("option", { value: r.scheduleId }, `#${r.scheduleId} (missing)`)] : []));
+  sel.value = r.scheduleId ? String(r.scheduleId) : "";
+  showScheduleInfo();
+  schedulePreview();
 }
 
-const selectedTopics = () => $$("#f-topics input:checked").map((i) => i.value);
-const readCodes = () => $$("#f-codes input:checked").map((i) => i.value);
+// showScheduleInfo describes the schedule picked in the rule editor.
+function showScheduleInfo() {
+  const s = (state.schedules || []).find((x) => String(x.id) === $("#f-schedule").value);
+  const info = $("#f-schedule-info");
+  if (!s) {
+    info.textContent = (state.schedules || []).length ? "" : "Create schedules on the Schedules tab.";
+    return;
+  }
+  const on = scheduleActive(s, new Date());
+  info.replaceChildren(`${scheduleText(s)} · ${tzLabel(s.timezone)} · `, h(on ? "span.on-now" : "span.off-now", {}, on ? "open now" : "closed now"));
+}
 
-function renderCodes(selected) {
-  const topics = selectedTopics();
-  const shown = topics.length ? topics : state.catalog.topics;
-  const known = new Set();
-  const chips = [];
-  for (const t of shown) {
-    for (const c of state.catalog.codes[t]) {
-      // Qualify codes that exist under several topics only when ambiguous.
-      known.add(c);
-      chips.push(h("label.chip", { title: `${t}:${c}` }, h("input", { type: "checkbox", value: c, checked: selected.includes(c) || selected.includes(`${t}:${c}`) }), shown.length > 1 ? `${t}:${c}` : c));
+const selectedTopics = () => state.topicPicker ? state.topicPicker.values() : [];
+const readCodes = () => state.codePicker ? state.codePicker.values() : [];
+
+// pillPicker turns container into a dropdown that adds removable pills.
+// options() returns [[group label or null, values]] and is re-read on every
+// refresh, so it can depend on another picker. Pills for values that aren't
+// among the options (e.g. entered as JSON) are kept; with warnUnknown they're
+// flagged, since the rule won't match them under the chosen topics.
+function pillPicker(container, { placeholder, empty, options, onchange, warnUnknown = false }) {
+  const pills = h("div.pills", { "data-empty": empty });
+  const sel = h("select.picker-add", { "aria-label": placeholder });
+  const values = () => $$(".pill", pills).map((p) => p.dataset.value);
+  const refresh = () => {
+    const have = new Set(values());
+    const known = new Set();
+    const groups = options();
+    sel.replaceChildren(h("option", { value: "" }, placeholder), ...groups.map(([label, list]) => {
+      const opts = list.map((v) => {
+        known.add(v);
+        return h("option", { value: v, disabled: have.has(v) }, v);
+      });
+      return label && groups.length > 1 ? h("optgroup", { label }, opts) : opts;
+    }).flat());
+    sel.value = "";
+    pills.classList.toggle("is-empty", !have.size);
+    for (const p of $$(".pill", pills)) {
+      const v = p.dataset.value;
+      const unknown = warnUnknown && !known.has(v) && !known.has(v.split(":").pop());
+      p.classList.toggle("unknown", unknown);
+      p.title = unknown ? `“${v}” isn't a code of the chosen topics` : "";
     }
-  }
-  // Keep custom/unknown codes so JSON-entered values aren't lost.
-  for (const c of selected) {
-    if (!known.has(c) && !known.has(c.split(":").pop())) chips.push(h("label.chip", {}, h("input", { type: "checkbox", value: c, checked: true }), c));
-  }
-  $("#f-codes").replaceChildren(...chips);
+  };
+  const pill = (v) => {
+    const el = h("span.pill", {}, h("span", {}, v),
+      h("button", { type: "button", "aria-label": `Remove ${v}`, onclick: () => { el.remove(); refresh(); onchange?.(); sel.focus(); } }, "✕"));
+    el.dataset.value = v;
+    return el;
+  };
+  sel.addEventListener("change", () => {
+    const v = sel.value;
+    if (v && !values().includes(v)) pills.append(pill(v));
+    refresh();
+    onchange?.();
+  });
+  container.replaceChildren(pills, sel);
+  const set = (list) => {
+    pills.replaceChildren(...[...new Set(list)].map(pill));
+    refresh();
+    onchange?.();
+  };
+  refresh();
+  return { values, refresh, set };
 }
 
 function addFilterRow(f) {
@@ -468,19 +598,19 @@ function addFilterRow(f) {
 
 const field = (label, input) => [h("span.muted", {}, label), input];
 
+const ACTION_LABELS = { http: "HTTP request", delay: "Delay", discord: "Discord message", request: "Saved action" };
+
 // addActionBox renders an action's form into container (the rule editor's
-// action list by default). With fixed, it's the single request in the saved
-// request editor: no reorder/remove buttons, name or continue-on-error.
+// action list by default). With fixed, it's the single action in the saved
+// action editor: no header, reorder/remove buttons, name or continue-on-error.
 function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
-  const box = h("div.action-box", {});
+  const box = h("div.action-box" + (fixed ? ".fixed" : ""), {});
   box.dataset.type = a.type;
-  const head = h("div.action-head", {},
-    h("strong", {}, { http: "HTTP request", delay: "Delay", discord: "Discord message", request: "Saved request" }[a.type] || a.type),
-    ...(fixed ? [] : [
-      h("button.btn.small", { type: "button", onclick: () => box.previousElementSibling && box.parentNode.insertBefore(box, box.previousElementSibling) }, "↑"),
-      h("button.btn.small", { type: "button", onclick: () => box.nextElementSibling && box.parentNode.insertBefore(box.nextElementSibling, box) }, "↓"),
-      h("button.btn.small.danger", { type: "button", onclick: () => box.remove() }, "✕"),
-    ]),
+  const head = fixed ? null : h("div.action-head", {},
+    h("strong", {}, ACTION_LABELS[a.type] || a.type),
+    h("button.btn.small", { type: "button", "aria-label": "Move up", onclick: () => box.previousElementSibling && box.parentNode.insertBefore(box, box.previousElementSibling) }, "↑"),
+    h("button.btn.small", { type: "button", "aria-label": "Move down", onclick: () => box.nextElementSibling && box.parentNode.insertBefore(box.nextElementSibling, box) }, "↓"),
+    h("button.btn.small.danger", { type: "button", "aria-label": "Remove action", onclick: () => box.remove() }, "✕"),
   );
   const inp = (k, attrs = {}) => h("input", { "data-k": k, value: a[k] ?? "", ...attrs });
   let grid;
@@ -510,17 +640,17 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
     );
   } else if (a.type === "delay") {
     grid = h("div.action-grid", {},
-      field("Name", inp("name", { placeholder: "optional label" })),
+      fixed ? null : field("Name", inp("name", { placeholder: "optional label" })),
       field("Delay (ms)", inp("delayMillis", { type: "number", min: 1, max: 600000 })));
   } else if (a.type === "discord") {
-    grid = discordActionGrid(a, inp);
+    grid = discordActionGrid(a, inp, fixed);
   } else if (a.type === "request") {
     grid = requestActionGrid(a, inp);
   } else {
     grid = h("pre", {}, JSON.stringify(a, null, 2));
     box.dataset.raw = JSON.stringify(a);
   }
-  box.append(head, grid);
+  box.append(...[head, grid].filter(Boolean));
   container.append(box);
   return box;
 }
@@ -528,7 +658,7 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
 // discordActionGrid is the form for a "discord" action. Its extra webhook
 // properties live under a.discord (inputs tagged data-dk); embeds are
 // .embed-box elements (data-ek) with .embed-field rows (data-fk).
-function discordActionGrid(a, inp) {
+function discordActionGrid(a, inp, fixed = false) {
   const d = a.discord || {};
   const msg = h("textarea", { "data-k": "message", rows: 2, placeholder: "Optional if you add an embed" });
   msg.value = a.message || "";
@@ -548,7 +678,7 @@ function discordActionGrid(a, inp) {
       field("Thread name", dinp("threadName", { placeholder: "forum channels: start a new post with this title" }))));
 
   return h("div.action-grid", {},
-    field("Name", inp("name", { placeholder: "optional label" })),
+    fixed ? null : field("Name", inp("name", { placeholder: "optional label" })),
     field("Webhook URL", inp("webhookUrl", { placeholder: "blank = Y6IFTTT_DISCORD_WEBHOOK_URL" })),
     field("Message", msg),
     field("Ping users", dinp("pingUsers", { value: (d.pingUsers || []).join(", "), placeholder: "user IDs, comma-separated (right-click › Copy User ID)" })),
@@ -557,7 +687,7 @@ function discordActionGrid(a, inp) {
       dchk("pingEveryone", "Allow @everyone / @here", "Otherwise @everyone and @here in the message don't ping"),
       dchk("silent", "Silent", "Post without a push or desktop notification"),
       dchk("tts", "Text-to-speech"),
-      h("label.inline", {}, h("input", { type: "checkbox", "data-k": "continueOnError", checked: !!a.continueOnError }), "Continue on error"))),
+      fixed ? null : h("label.inline", {}, h("input", { type: "checkbox", "data-k": "continueOnError", checked: !!a.continueOnError }), "Continue on error"))),
     h("div.full", {}, more),
     field("Embeds", h("div", {}, embeds, addEmbed)),
   );
@@ -644,13 +774,16 @@ function readDiscord(box) {
   return Object.keys(d).length ? d : undefined;
 }
 
-// requestActionGrid is the form for a "request" action: pick a saved request,
+// savedActionLine is a one-line description of what a saved action does.
+const savedActionLine = (sr) => actionSummary({ ...sr.request, type: sr.request.type || "http", name: "" });
+
+// requestActionGrid is the form for a "request" action: pick a saved action,
 // then fill in its parameters (inputs rebuilt when the choice changes).
 function requestActionGrid(a, inp) {
   const known = state.requests || [];
   const sel = h("select", { "data-k": "requestId" },
-    h("option", { value: "" }, known.length ? "Choose a saved request…" : "No saved requests yet (create one on the Requests tab)"),
-    known.map((r) => h("option", { value: r.id }, r.name)));
+    h("option", { value: "" }, known.length ? "Choose a saved action…" : "No saved actions yet (create one on the Saved actions tab)"),
+    known.map((r) => h("option", { value: r.id }, `${r.name} · ${ACTION_LABELS[r.request.type || "http"]}`)));
   if (a.requestId && !known.some((r) => r.id === Number(a.requestId))) {
     sel.append(h("option", { value: a.requestId }, `#${a.requestId} (missing)`));
   }
@@ -663,7 +796,7 @@ function requestActionGrid(a, inp) {
     // Keep what was typed when switching back and forth.
     for (const el of $$("[data-param]", paramsBox)) values[el.dataset.param] = el.value;
     const sr = known.find((r) => r.id === Number(sel.value));
-    summary.textContent = sr ? `${sr.request.method || "GET"} ${sr.request.url}${sr.description ? ` · ${sr.description}` : ""}` : "";
+    summary.textContent = sr ? `${savedActionLine(sr)}${sr.description ? ` · ${sr.description}` : ""}` : "";
     if (!sr) {
       paramsBox.replaceChildren();
       return;
@@ -673,14 +806,14 @@ function requestActionGrid(a, inp) {
         h("span", {}, p.name, p.default ? "" : h("span.error", { title: "required" }, " *")),
         h("input", { "data-param": p.name, value: values[p.name] ?? "", placeholder: p.default ? `default: ${p.default}` : (p.description || "required") }),
         p.description && p.default ? h("span.muted.small", {}, p.description) : null))
-      : [h("span.muted.small", {}, "This request has no parameters.")]));
+      : [h("span.muted.small", {}, "This saved action has no parameters.")]));
   };
   sel.addEventListener("change", render);
   render();
 
   return h("div.action-grid", {},
-    field("Name", inp("name", { placeholder: "optional label (defaults to the request's name)" })),
-    field("Request", h("div", {}, sel, summary)),
+    field("Name", inp("name", { placeholder: "optional label (defaults to the saved action's name)" })),
+    field("Saved action", h("div", {}, sel, summary)),
     field("Parameters", paramsBox),
     field("Options", h("label.inline", {}, h("input", { type: "checkbox", "data-k": "continueOnError", checked: !!a.continueOnError }), "Continue on error")),
   );
@@ -739,8 +872,72 @@ function readVisual() {
         value: $(".ff-value", row).value,
       })).filter((f) => f.field),
     },
+    ...($("#f-schedule").value ? { scheduleId: Number($("#f-schedule").value) } : {}),
     actions: $$("#f-actions .action-box").map(readAction),
+    ...($$("#f-onfail .action-box").length ? { onFailure: $$("#f-onfail .action-box").map(readAction) } : {}),
   };
+}
+
+// ---------- template preview ----------
+// While "Preview templates" is ticked, the editor's actions are rendered by
+// the server (POST /api/preview) against a sample event for the trigger, and
+// each action box shows what its URL, body, message, … would be. Secrets
+// show as ‹secret NAME›.
+let previewTimer, previewSeq = 0;
+const PREVIEW_KEY = "y6.previewTemplates";
+
+function wirePreview() {
+  const box = $("#f-preview-on");
+  try { box.checked = localStorage.getItem(PREVIEW_KEY) === "1"; } catch { /* storage blocked */ }
+  box.addEventListener("change", () => {
+    try { localStorage.setItem(PREVIEW_KEY, box.checked ? "1" : "0"); } catch { /* storage blocked */ }
+    schedulePreview();
+  });
+  // Any edit in the form refreshes the preview shortly after typing stops.
+  for (const type of ["input", "change"]) {
+    $("#editor-visual").addEventListener(type, (e) => { if (e.target !== box) schedulePreview(); });
+  }
+  $("#editor-visual").addEventListener("click", (e) => { if (e.target.closest(".action-head button, .ff-del, .pill button")) schedulePreview(); });
+}
+
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  if (!$("#f-preview-on").checked) {
+    $$("#editor .preview").forEach((p) => p.remove());
+    $("#preview-note").classList.add("hidden");
+    return;
+  }
+  previewTimer = setTimeout(runPreview, 400);
+}
+
+async function runPreview() {
+  if (!$("#editor").open || !$("#f-preview-on").checked) return;
+  const seq = ++previewSeq;
+  let res;
+  try {
+    res = await api("POST", "/api/preview", { rule: readVisual() });
+  } catch (e) {
+    if (seq !== previewSeq) return;
+    $("#preview-note").textContent = `Preview unavailable: ${e.message}`;
+    $("#preview-note").classList.remove("hidden");
+    return;
+  }
+  if (seq !== previewSeq) return;
+  const ev = res.event;
+  $("#preview-note").replaceChildren("Previewing with a sample ", h("code", {}, `${ev.eventTopic}:${ev.eventCode}`), " event",
+    res.matchesTrigger ? "." : h("span.error", {}, " (it doesn't pass this rule's filters, so values may differ from real events)."));
+  $("#preview-note").classList.remove("hidden");
+  const show = (boxes, results) => boxes.forEach((box, i) => {
+    $(":scope > .preview", box)?.remove();
+    const fields = results?.[i] || [];
+    if (!fields.length) return;
+    box.append(h("div.preview", {}, h("div.preview-title", {}, "Preview"),
+      fields.map((f) => h("div.pv-row", {},
+        h("span.pv-field", {}, f.field),
+        f.error ? h("span.pv-value.error", {}, f.error) : h("code.pv-value", {}, f.value || "(empty)")))));
+  });
+  show($$("#f-actions > .action-box"), res.actions);
+  show($$("#f-onfail > .action-box"), res.onFailure);
 }
 
 // ---------- events ----------
@@ -749,18 +946,53 @@ function readVisual() {
 // expanded rows stay open and nothing flickers.
 const emptyEventsRow = (text) => h("tr", {}, h("td.empty", { colspan: 5 }, text));
 
+// The search box and outcome filter. While either is set, the server does
+// the matching; new pushed events trigger a refresh rather than being shown
+// as-is, since only the server can tell whether they match.
+const eventFilter = () => ({ q: $("#events-q").value.trim(), outcome: $("#events-outcome").value, from: $("#events-from").value, to: $("#events-to").value });
+const filteringEvents = () => { const f = eventFilter(); return !!(f.q || f.outcome || f.from || f.to); };
+let eventsSeq = 0;
+let eventsRefreshTimer;
+
+function wireEventSearch() {
+  let timer;
+  const run = () => {
+    clearTimeout(timer);
+    state.events = [];
+    loadEvents();
+  };
+  $("#events-q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(run, 300); });
+  for (const id of ["#events-outcome", "#events-from", "#events-to"]) $(id).addEventListener("change", run);
+  $("#events-search").addEventListener("submit", (e) => { e.preventDefault(); run(); });
+}
+
 async function loadEvents(older) {
   const body = $("#events-body");
-  if (!older && !state.events.length) body.replaceChildren(emptyEventsRow("Loading events…"));
+  if (!older && !state.events.length) body.replaceChildren(emptyEventsRow(filteringEvents() ? "Searching…" : "Loading events…"));
   const before = older && state.events.length ? state.events[state.events.length - 1].id : 0;
+  const f = eventFilter();
+  const qs = new URLSearchParams({ limit: 50 });
+  if (before) qs.set("before", before);
+  if (f.q) qs.set("q", f.q);
+  if (f.outcome) qs.set("outcome", f.outcome);
+  // Dates are local days: from the start of "from" to the end of "to".
+  if (f.from) qs.set("since", new Date(`${f.from}T00:00`).toISOString());
+  if (f.to) {
+    const end = new Date(`${f.to}T00:00`);
+    end.setDate(end.getDate() + 1);
+    qs.set("until", end.toISOString());
+  }
+  // Drop responses to searches that have since been replaced.
+  const seq = ++eventsSeq;
   let page;
   try {
-    page = await api("GET", `/api/events?limit=50${before ? `&before=${before}` : ""}`);
+    page = await api("GET", `/api/events?${qs}`);
     page.forEach(stampEvent);
   } catch (e) {
-    if (!state.events.length) body.replaceChildren(emptyEventsRow(`Couldn't load events: ${e.message}`));
+    if (seq === eventsSeq && !state.events.length) body.replaceChildren(emptyEventsRow(`Couldn't load events: ${e.message}`));
     return;
   }
+  if (seq !== eventsSeq) return;
   if (older) {
     state.events = state.events.concat(page.filter((e) => !state.events.some((x) => x.id === e.id)));
   } else {
@@ -777,7 +1009,9 @@ function renderEvents() {
   const body = $("#events-body");
   const details = new Map($$("#events-body tr.detail").map((r) => [r.dataset.id, r]));
   if (!state.events.length) {
-    body.replaceChildren(emptyEventsRow("No events yet. Point a YourSix webhook at this service or simulate one from Setup."));
+    body.replaceChildren(emptyEventsRow(filteringEvents()
+      ? "No events match this search."
+      : "No events yet. Point a YourSix webhook at this service or simulate one from Setup."));
     return;
   }
   body.replaceChildren(...state.events.flatMap((e) => {
@@ -817,6 +1051,12 @@ function upsertEvent(ev) {
     return;
   }
   if (state.events.length && ev.id < state.events[0].id) return;
+  if (filteringEvents()) {
+    // Let the server decide if it matches; batch bursts into one refresh.
+    clearTimeout(eventsRefreshTimer);
+    eventsRefreshTimer = setTimeout(() => loadEvents(), 800);
+    return;
+  }
   state.events.unshift(ev);
   if (state.events.length === 1) {
     renderEvents();
@@ -916,6 +1156,7 @@ function stopLive() {
 const skipReason = {
   cooldown: "Event accepted but ignored: the rule is inside its cooldown window.",
   busy: "Event accepted but ignored: a previous run of this rule was still in progress.",
+  offhours: "Event accepted but ignored: it came outside the rule's active hours.",
 };
 
 async function fillEventDetail(row, id) {
@@ -1221,12 +1462,14 @@ async function reloadUI(e) {
   }
 }
 
-// ---------- saved requests ----------
+// ---------- saved actions ----------
+// Stored and served as "requests" (/api/requests, action type "request"):
+// they started out as HTTP-only saved requests.
 async function loadRequests() {
   state.requests = await api("GET", "/api/requests");
   const list = $("#requests-list");
   if (!state.requests.length) {
-    list.replaceChildren(h("div.empty", {}, isAdmin() ? "No saved requests yet. Create one to reuse it across rules." : "No saved requests yet."));
+    list.replaceChildren(h("div.empty", {}, isAdmin() ? "No saved actions yet. Create one to reuse it across rules." : "No saved actions yet."));
     return;
   }
   list.replaceChildren(...state.requests.map(requestCard));
@@ -1235,18 +1478,21 @@ async function loadRequests() {
 function requestCard(sr) {
   const admin = isAdmin();
   const req = sr.request;
-  const usesSecrets = /\bsecret\s+"/.test([req.url, req.body, req.password, ...Object.values(req.headers || {})].join(" "));
-  return h("div.card", {},
+  // Every templated string is in the JSON, with its quotes escaped.
+  const usesSecrets = /\bsecret\s+\\"/.test(JSON.stringify(req));
+  const card = h("div.card", {},
     h("div.card-head", {},
       h("h3", {}, sr.name),
+      h("span.badge.type", {}, ACTION_LABELS[req.type || "http"]),
       req.auth ? h("span.badge", {}, `${req.auth} auth`) : null,
       usesSecrets ? h("span.badge", { title: "Uses secrets: only rules of the admin who saved it can use it" }, "uses secrets") : null,
       admin ? h("button.btn.small", { onclick: () => testRequest(sr) }, "Test") : null,
+      h("button.btn.small", { onclick: () => showHistory("action", sr.id, sr.name) }, "History"),
       admin ? h("button.btn.small", { onclick: () => openRequestEditor(sr) }, "Edit") : null,
       admin ? h("button.btn.small.danger", { onclick: () => deleteRequest(sr) }, "Delete") : null,
     ),
     sr.description ? h("p.summary", {}, sr.description) : null,
-    h("p.request-line", {}, `${req.method || "GET"} ${req.url}`),
+    h("p.request-line", {}, savedActionLine(sr)),
     sr.params.length
       ? h("p.summary", {}, "Parameters: ", sr.params.map((p) => h("span.badge", { title: p.description || "" }, p.default ? `${p.name} = ${p.default}` : `${p.name} (required)`)))
       : null,
@@ -1255,9 +1501,12 @@ function requestCard(sr) {
       ? h("p.muted.small", {}, `Saved by ${sr.updatedByName}.`)
       : null,
   );
+  if (admin) clickToEdit(card, `${sr.name}: ${ACTION_LABELS[req.type || "http"]}`, () => openRequestEditor(sr));
+  return card;
 }
 
-const blankRequest = () => ({ name: "", description: "", params: [], request: { ...blankAction("http"), name: undefined, continueOnError: undefined } });
+const blankSaved = (type) => ({ ...blankAction(type), name: undefined, continueOnError: undefined });
+const blankRequest = () => ({ name: "", description: "", params: [], request: blankSaved("http") });
 
 function addParamRow(p = {}) {
   const row = h("div.param-row", {},
@@ -1272,6 +1521,9 @@ function addParamRow(p = {}) {
 function readRequestForm() {
   const box = $("#r-request .action-box");
   const request = box ? readAction(box) : {};
+  // Rules supply these; the fixed form has no inputs for them anyway.
+  delete request.name;
+  delete request.continueOnError;
   return {
     name: $("#r-name").value.trim(),
     description: $("#r-desc").value.trim(),
@@ -1290,15 +1542,20 @@ function readRequestForm() {
 function openRequestEditor(sr) {
   state.editingRequest = sr;
   const v = sr ? structuredClone(sr) : blankRequest();
-  $("#req-title").textContent = sr ? `Edit: ${sr.name}` : "New saved request";
+  $("#req-title").textContent = sr ? `Edit: ${sr.name}` : "New saved action";
   $("#req-error").textContent = "";
   $("#r-name").value = v.name;
   $("#r-desc").value = v.description || "";
   $("#r-params").replaceChildren();
   (v.params || []).forEach((p) => addParamRow(p));
+  const type = v.request.type || "http";
+  $("#r-type").value = type;
+  // One form per type, kept while the editor is open so switching type and
+  // back doesn't lose what was typed.
+  state.savedForms = {};
   $("#r-request").replaceChildren();
-  addActionBox({ ...v.request, type: "http" }, $("#r-request"), { fixed: true });
-  $("#req-editor").showModal();
+  state.savedForms[type] = addActionBox({ ...v.request, type }, $("#r-request"), { fixed: true });
+  if (!$("#req-editor").open) $("#req-editor").showModal();
   guards.request.snapshot();
 }
 
@@ -1306,27 +1563,45 @@ function wireRequestEditor() {
   guardEditor("request", $("#req-editor"), $("#req-cancel"), () => canonical(readRequestForm()));
   $("#new-request").addEventListener("click", () => openRequestEditor(null));
   $("#r-add-param").addEventListener("click", () => addParamRow());
+  $("#r-type").addEventListener("change", (e) => {
+    const type = e.target.value;
+    const box = state.savedForms[type];
+    if (box) $("#r-request").replaceChildren(box);
+    else {
+      $("#r-request").replaceChildren();
+      state.savedForms[type] = addActionBox(blankSaved(type), $("#r-request"), { fixed: true });
+    }
+  });
   $("#req-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const err = $("#req-error");
     err.textContent = "";
     const body = readRequestForm();
-    try {
-      if (state.editingRequest) await api("PUT", `/api/requests/${state.editingRequest.id}`, body);
-      else await api("POST", "/api/requests", body);
-      $("#req-editor").close();
-      loadRequests();
-    } catch (ex) {
-      err.textContent = ex.message;
-    }
+    const save = async (expected) => {
+      err.textContent = "";
+      try {
+        if (state.editingRequest) await api("PUT", `/api/requests/${state.editingRequest.id}`, { ...body, ...(expected ? { updatedAt: expected } : {}) });
+        else await api("POST", "/api/requests", body);
+        $("#req-editor").close();
+        loadRequests();
+      } catch (ex) {
+        if (ex.status === 409 && ex.data?.conflict) {
+          showConflict(err, ex, state.editingRequest, {
+            overwrite: () => save(ex.data.current.updatedAt),
+            reload: () => openRequestEditor(ex.data.current),
+          });
+        } else err.textContent = ex.message;
+      }
+    };
+    save(state.editingRequest?.updatedAt);
   });
 }
 
 async function deleteRequest(sr) {
   const yes = await confirmDialog({
-    title: "Delete this saved request?",
+    title: "Delete this saved action?",
     message: [h("strong", {}, sr.name), " will be removed. Rules can no longer use it."],
-    confirmLabel: "Delete request", danger: true,
+    confirmLabel: "Delete saved action", danger: true,
   });
   if (!yes) return;
   try {
@@ -1337,9 +1612,12 @@ async function deleteRequest(sr) {
   loadRequests();
 }
 
-// testRequest runs a saved request on its own. With parameters, it first
+// testRequest runs a saved action on its own. With parameters, it first
 // asks for their values (defaults pre-filled).
 function testRequest(sr) {
+  const does = { delay: ["Testing ", h("strong", {}, sr.name), " just waits; nothing is sent."],
+    discord: ["Testing posts ", h("strong", {}, sr.name), " to Discord for real."] }[sr.request.type]
+    || ["Testing sends ", h("strong", {}, sr.name), " for real, so it will call the device it points at."];
   const run = async (params) => {
     showResult(`Testing "${sr.name}"…`, h("p.muted", {}, "Starting…"));
     let start;
@@ -1354,8 +1632,8 @@ function testRequest(sr) {
   };
   if (!sr.params.length) {
     confirmDialog({
-      title: "Run this request now?",
-      message: ["Testing sends ", h("strong", {}, sr.name), " for real, so it will call the device it points at."],
+      title: "Run this saved action now?",
+      message: does,
       confirmLabel: "Run test",
     }).then((yes) => yes && run({}));
     return;
@@ -1414,12 +1692,15 @@ function runProgress(run, { compact = false } = {}) {
   const timer = isDelay
     ? h("span.countdown", { "data-until": cur._untilLocal, "data-suffix": compact ? "" : " left" }, fmtClock(cur._untilLocal - Date.now()) + (compact ? "" : " left"))
     : h("span.elapsed", { "data-since": cur._startedLocal, "data-suffix": compact ? "" : " elapsed" }, fmtClock(Date.now() - cur._startedLocal) + (compact ? "" : " elapsed"));
+  // Steps past the rule's own actions are its on-failure actions.
+  const failing = typeof total === "number" && cur.index >= total;
+  const where = failing ? "Handling failure" : `Step ${cur.index + 1} of ${total}`;
   if (compact) {
-    return h("span.progress", { title: `Step ${cur.index + 1} of ${total}: ${cur.name}` }, h("span.pulse-dot", { "aria-hidden": "true" }), `${cur.index + 1}/${total} · `, timer);
+    return h("span.progress", { title: `${where}: ${cur.name}` }, h("span.pulse-dot", { "aria-hidden": "true" }), failing ? "failure · " : `${cur.index + 1}/${total} · `, timer);
   }
   const bar = isDelay ? h("div.delay-bar", { "aria-hidden": "true" }, h("div.delay-fill", { "data-start": cur._untilLocal - cur._durationMs, "data-until": cur._untilLocal })) : null;
   return h("div.progress", {},
-    h("div.progress-line", {}, h("span.pulse-dot", { "aria-hidden": "true" }), h("strong", {}, `Step ${cur.index + 1} of ${total}`), ` · ${cur.name} · `, timer),
+    h("div.progress-line", {}, h("span.pulse-dot", { "aria-hidden": "true" }), h("strong", {}, where), ` · ${cur.name} · `, timer),
     bar);
 }
 
@@ -1492,3 +1773,388 @@ function confirmDialog({ title, message, confirmLabel = "OK", danger = false, ca
 
 // infoDialog shows a message with just a Close button.
 const infoDialog = (title, message) => confirmDialog({ title, message, confirmLabel: null, cancelLabel: "Close" });
+
+// ---------- history ----------
+// The edit log (GET /api/history), newest first. An entry opens to a line
+// diff of the item's content against its previous version, or against any
+// other version of the same item.
+const KIND_LABELS = { rule: "Rule", action: "Saved action", schedule: "Schedule" };
+const CHANGE_LABELS = { created: "created", updated: "edited", deleted: "deleted", existing: "before history" };
+const FIELD_LABELS = {
+  cooldownSeconds: "cooldown", cooldownFrom: "cooldown", skipIfRunning: "ignore while running",
+  request: "action", params: "parameters",
+};
+
+function wireHistory() {
+  $("#history-kind").addEventListener("change", () => {
+    state.historyScope = null;
+    loadHistory();
+  });
+  $("#history-more").addEventListener("click", () => loadHistory(true));
+}
+
+// showHistory opens the History tab on one rule or saved action.
+function showHistory(kind, id, name) {
+  state.historyScope = { kind, id, name };
+  showTab("history");
+}
+
+async function loadHistory(older) {
+  const list = $("#history-list");
+  const scope = state.historyScope;
+  if (scope) $("#history-kind").value = scope.kind;
+  $("#history-scope").classList.toggle("hidden", !scope);
+  if (scope) {
+    $("#history-scope").replaceChildren(h("span.pill", {},
+      h("span", {}, `${KIND_LABELS[scope.kind]}: ${scope.name}`),
+      h("button", { type: "button", "aria-label": "Show all changes", onclick: () => {
+        state.historyScope = null;
+        $("#history-kind").value = "";
+        loadHistory();
+      } }, "✕")));
+  }
+  const prev = older ? state.history || [] : [];
+  const qs = new URLSearchParams({ limit: 50 });
+  if ($("#history-kind").value) qs.set("kind", $("#history-kind").value);
+  if (scope) qs.set("id", scope.id);
+  if (older && prev.length) qs.set("before", prev[prev.length - 1].id);
+  if (!older) {
+    state.historyItems = {};
+    list.replaceChildren(h("div.empty", {}, "Loading…"));
+  }
+  let page;
+  try {
+    page = await api("GET", `/api/history?${qs}`);
+  } catch (e) {
+    list.replaceChildren(h("div.empty", {}, `Couldn't load history: ${e.message}`));
+    return;
+  }
+  state.history = prev.concat(page);
+  $("#history-more").classList.toggle("hidden", page.length < 50);
+  if (!state.history.length) {
+    list.replaceChildren(h("div.empty", {}, scope ? "No changes recorded for this item yet." : "No changes recorded yet. Edits made from now on show up here."));
+    return;
+  }
+  if (older) list.append(...page.map(historyEntry));
+  else list.replaceChildren(...page.map(historyEntry));
+}
+
+function historyEntry(rev) {
+  const body = h("div.rev-body", {});
+  const head = h("button.rev-head", { type: "button", "aria-expanded": "false" },
+    h(`span.badge.change-${rev.change}`, {}, CHANGE_LABELS[rev.change] || rev.change),
+    h("span.muted.small.rev-kind", {}, KIND_LABELS[rev.kind] || rev.kind),
+    h("strong.rev-name", {}, rev.name),
+    h("span.muted.small.rev-meta", { title: fmtTime(rev.at) }, `${rev.byName ? `${rev.byName} · ` : ""}${ago(rev.at)}`));
+  const el = h("div.rev", {}, head, body);
+  head.addEventListener("click", () => {
+    const open = !el.classList.contains("open");
+    el.classList.toggle("open", open);
+    head.setAttribute("aria-expanded", String(open));
+    if (open && !body.childElementCount) fillRevision(body, rev);
+  });
+  return el;
+}
+
+// itemRevisions is every revision of one item, newest first (cached while
+// the list is shown).
+async function itemRevisions(kind, id) {
+  const key = `${kind}:${id}`;
+  state.historyItems ||= {};
+  state.historyItems[key] ||= api("GET", `/api/history?kind=${kind}&id=${id}&limit=500`);
+  try {
+    return await state.historyItems[key];
+  } catch (e) {
+    delete state.historyItems[key];
+    throw e;
+  }
+}
+
+async function fillRevision(body, rev) {
+  body.replaceChildren(h("p.muted.small", {}, "Loading…"));
+  let all;
+  try {
+    all = await itemRevisions(rev.kind, rev.itemId);
+  } catch (e) {
+    body.replaceChildren(h("p.error", {}, e.message));
+    return;
+  }
+  const others = all.filter((r) => r.id !== rev.id);
+  const previous = all.find((r) => r.id < rev.id);
+  const label = (r) => `${r.id < rev.id ? "Earlier" : "Later"}: ${CHANGE_LABELS[r.change] || r.change}${r.byName ? ` by ${r.byName}` : ""} · ${fmtTime(r.at)}`;
+  const sel = h("select", { "aria-label": "Compare with" },
+    h("option", { value: "" }, rev.change === "deleted" ? "Nothing (show what was deleted)" : "Nothing (show this version in full)"),
+    others.map((r) => h("option", { value: r.id }, label(r))));
+  // A deletion's snapshot is the last version, so comparing it with the
+  // previous one would show nothing; show what was removed instead.
+  sel.value = rev.change !== "deleted" && previous ? String(previous.id) : "";
+  const showAll = h("input", { type: "checkbox" });
+  const out = h("div", {});
+  const render = () => {
+    const other = others.find((r) => String(r.id) === sel.value);
+    let from = null, to = null;
+    if (!other) [from, to] = rev.change === "deleted" ? [rev.snapshot, null] : [null, rev.snapshot];
+    else if (other.id < rev.id) [from, to] = [other.snapshot, rev.snapshot];
+    else [from, to] = [rev.snapshot, other.snapshot];
+    const keys = from && to ? changedKeys(from, to) : [];
+    out.replaceChildren(
+      ...(keys.length ? [h("p.small.rev-summary", {}, "Changed: ", [...new Set(keys.map((k) => FIELD_LABELS[k] || k))].join(", "))] : []),
+      ...diffView(pretty(from), pretty(to), showAll.checked));
+  };
+  sel.addEventListener("change", render);
+  showAll.addEventListener("change", render);
+  render();
+  body.replaceChildren(
+    h("div.row.rev-tools", {},
+      h("label.inline", {}, "Compare with ", sel),
+      h("label.inline", {}, showAll, "Show unchanged lines")),
+    out);
+}
+
+// diffView renders a diff, folding long unchanged stretches down to a few
+// lines of context unless all is set.
+function diffView(a, b, all) {
+  const lines = lineDiff(a, b);
+  if (a && b && lines.every(([t]) => t === " ")) return [h("p.muted.small", {}, "No differences.")];
+  const line = ([t, s]) => h(`span.d-${{ "+": "add", "-": "del", " ": "same" }[t]}`, {}, `${t} ${s}`);
+  const CONTEXT = 3;
+  const rows = [];
+  for (let k = 0; k < lines.length;) {
+    if (all || lines[k][0] !== " ") {
+      rows.push(line(lines[k++]));
+      continue;
+    }
+    let end = k;
+    while (end < lines.length && lines[end][0] === " ") end++;
+    const head = k === 0 ? 0 : CONTEXT, tail = end === lines.length ? 0 : CONTEXT;
+    if (end - k <= head + tail + 1) {
+      while (k < end) rows.push(line(lines[k++]));
+      continue;
+    }
+    for (let q = k; q < k + head; q++) rows.push(line(lines[q]));
+    rows.push(h("span.d-skip", {}, `⋯ ${end - k - head - tail} unchanged lines`));
+    for (let q = end - tail; q < end; q++) rows.push(line(lines[q]));
+    k = end;
+  }
+  return [h("pre.diff", {}, rows)];
+}
+
+// ---------- schedules ----------
+// Named sets of time windows (GET /api/schedules) that rules pick to limit
+// when they run. A schedule is open while any of its windows is: windows
+// add together, so overlaps are fine and change nothing.
+// The time maths (coverage, scheduleActive, …) lives in logic.js.
+
+// timeline draws a week (Mon–Sun rows, 24 hours across) with the open
+// times shaded, all windows merged, and a marker at the current time in the
+// schedule's zone.
+function timeline(s, { compact = false } = {}) {
+  const bits = scheduleCoverage(s);
+  const now = zonedMinute(s.timezone, new Date());
+  const pct = (m) => `${(m / 1440) * 100}%`;
+  const rows = DAYS.map(([, label], d) => {
+    const segs = [];
+    for (let m = 0; m < 1440;) {
+      if (!bits[d * 1440 + m]) { m++; continue; }
+      const start = m;
+      while (m < 1440 && bits[d * 1440 + m]) m++;
+      segs.push(h("span.tl-seg", { style: `left:${pct(start)};width:${pct(m - start)}`, title: `${label} ${fmtMinute(start)}–${fmtMinute(m)}` }));
+    }
+    const isToday = now >= 0 && Math.floor(now / 1440) === d;
+    return h("div.tl-row", {},
+      h(`span.tl-day${isToday ? ".today" : ""}`, {}, label),
+      h("div.tl-bar", { "aria-label": `${label}: ${segs.length ? segs.map((x) => x.title.slice(4)).join(", ") : "closed"}` },
+        segs, isToday ? h("span.tl-now", { style: `left:${pct(now % 1440)}`, title: `Now: ${fmtMinute(now % 1440)}` }) : null));
+  });
+  const ticks = compact ? null : h("div.tl-row.tl-ticks", { "aria-hidden": "true" }, h("span.tl-day", {}),
+    h("div.tl-scale", {}, [0, 6, 12, 18, 24].map((hr) => h("span", { style: `left:${pct(hr * 60)}` }, `${hr}`.padStart(2, "0")))));
+  return h(`div.timeline${compact ? ".compact" : ""}`, { role: "img", "aria-label": "Weekly open hours" }, rows, ticks);
+}
+
+
+// scheduleBadge labels a rule card with its schedule and whether it's open.
+function scheduleBadge(id) {
+  if (!id) return null;
+  const s = (state.schedules || []).find((x) => x.id === id);
+  if (!s) return h("span.badge.offhours", {}, `schedule #${id} missing`);
+  const on = scheduleActive(s, new Date());
+  return h(`span.badge${on ? "" : ".offhours"}`, { title: `Only runs ${scheduleText(s)}, ${tzLabel(s.timezone)} time. ${on ? "Open now." : "Closed now: events are ignored."}` },
+    `${s.name}${on ? "" : " · closed now"}`);
+}
+
+async function loadSchedules() {
+  state.schedules = await api("GET", "/api/schedules");
+  const list = $("#schedules-list");
+  if (!state.schedules.length) {
+    list.replaceChildren(h("div.empty", {}, isAdmin() ? "No schedules yet. Create one, then pick it in a rule." : "No schedules yet."));
+    return;
+  }
+  list.replaceChildren(...state.schedules.map(scheduleCard));
+}
+
+function scheduleCard(s) {
+  const admin = isAdmin();
+  const on = scheduleActive(s, new Date());
+  const card = h("div.card", {},
+    h("div.card-head", {},
+      h("h3", {}, s.name),
+      h(`span.badge.${on ? "ok" : "offhours"}`, {}, on ? "open now" : "closed now"),
+      h("span.badge", { title: s.timezone }, tzLabel(s.timezone)),
+      h("button.btn.small", { onclick: () => showHistory("schedule", s.id, s.name) }, "History"),
+      admin ? h("button.btn.small", { onclick: () => openScheduleEditor(s) }, "Edit") : null,
+      admin ? h("button.btn.small.danger", { onclick: () => deleteSchedule(s) }, "Delete") : null,
+    ),
+    s.description ? h("p.summary", {}, s.description) : null,
+    h("ul.windows-list", {}, s.windows.map((w) => h("li", {}, windowSummary(w)))),
+    timeline(s, { compact: true }),
+    h("p.summary", {}, s.usedBy.length ? ["Used by: ", s.usedBy.map((r) => h("span.badge", {}, r.name))] : "Not used by any rule yet."),
+  );
+  if (admin) clickToEdit(card, `${s.name}: ${on ? "open" : "closed"} now`, () => openScheduleEditor(s));
+  return card;
+}
+
+// fillTzSelect fills the time zone dropdown: common US zones first, then
+// every zone the browser knows, grouped by region.
+function fillTzSelect(sel, value) {
+  const groups = [h("optgroup", { label: "Common" }, COMMON_TZ.map(([v, l]) => h("option", { value: v }, l)))];
+  let all = [];
+  try { all = Intl.supportedValuesOf("timeZone"); } catch { /* older browsers: common zones only */ }
+  const byRegion = {};
+  for (const z of all) {
+    if (COMMON_TZ.some(([v]) => v === z)) continue;
+    (byRegion[z.split("/")[0]] ||= []).push(z);
+  }
+  for (const region of Object.keys(byRegion).sort()) {
+    groups.push(h("optgroup", { label: region }, byRegion[region].map((z) => h("option", { value: z }, z.replaceAll("_", " ")))));
+  }
+  sel.replaceChildren(...groups);
+  if (value && ![...sel.options].some((o) => o.value === value)) sel.append(h("option", { value }, value));
+  sel.value = value || DEFAULT_TZ;
+}
+
+function windowRow(w = {}) {
+  const row = h("div.window-row", {},
+    h("div.day-picks", {}, DAYS.map(([v, l]) => h("label.day-pick", {}, h("input", { type: "checkbox", value: v, checked: !!w.days?.includes(v) }), h("span", {}, l)))),
+    h("div.row", {},
+      h("label.inline", {}, "From ", h("input.w-from", { type: "time", value: w.from || "" })),
+      h("label.inline", {}, "to ", h("input.w-to", { type: "time", value: w.to || "" })),
+      h("button.btn.small", { type: "button", onclick: () => { $(".w-from", row).value = ""; $(".w-to", row).value = ""; refreshScheduleEditor(); } }, "All day"),
+      h("button.btn.small.danger", { type: "button", "aria-label": "Remove window", onclick: () => { row.remove(); refreshScheduleEditor(); } }, "✕")),
+    h("span.muted.small.window-summary", {}),
+    h("div.window-note", {}));
+  row.addEventListener("input", refreshScheduleEditor);
+  row.addEventListener("change", refreshScheduleEditor);
+  $("#s-windows").append(row);
+  return row;
+}
+
+function readWindow(row) {
+  const w = {};
+  const days = $$(".day-pick input:checked", row).map((i) => i.value);
+  if (days.length && days.length < 7) w.days = days;
+  const from = $(".w-from", row).value, to = $(".w-to", row).value;
+  if (from || to) Object.assign(w, { from, to });
+  return w;
+}
+
+function readScheduleForm() {
+  return {
+    name: $("#s-name").value.trim(),
+    description: $("#s-desc").value.trim(),
+    timezone: $("#s-tz").value,
+    windows: $$("#s-windows .window-row").map(readWindow),
+  };
+}
+
+// refreshScheduleEditor updates each window's summary and warnings, the
+// merged weekly timeline, and whether the schedule is open right now.
+function refreshScheduleEditor() {
+  const rows = $$("#s-windows .window-row");
+  const s = readScheduleForm();
+  const problem = (w) => (!w.from !== !w.to ? "Set both a start and an end time, or neither for all day."
+    : w.from && w.from === w.to ? "Start and end are the same time. Clear both times (All day) to cover the whole day."
+      : "");
+  const valid = s.windows.map((w) => !problem(w));
+  const redundant = redundantWindows(s.windows.map((w, i) => (valid[i] ? w : { days: [] })).filter((_, i) => valid[i]));
+  // Map indexes among valid windows back to row indexes.
+  const validIdx = s.windows.map((_, i) => i).filter((i) => valid[i]);
+  rows.forEach((row, i) => {
+    const w = s.windows[i];
+    $(".window-summary", row).textContent = windowSummary(w);
+    const note = $(".window-note", row);
+    const err = problem(w);
+    const dup = !err && redundant.has(validIdx.indexOf(i));
+    row.classList.toggle("has-error", !!err);
+    row.classList.toggle("is-redundant", dup);
+    note.replaceChildren(...(err ? [h("span.error", {}, err)]
+      : dup ? [h("span.warn-text", {}, "Other windows already cover all of this one, so it adds nothing. "),
+        h("button.btn.small", { type: "button", onclick: () => { row.remove(); refreshScheduleEditor(); } }, "Remove it")]
+        : []));
+  });
+  const usable = { ...s, windows: s.windows.filter((w, i) => valid[i]) };
+  $("#s-timeline").replaceChildren(timeline(usable));
+  const local = (() => {
+    try { return new Intl.DateTimeFormat(undefined, { timeZone: s.timezone, weekday: "short", hour: "2-digit", minute: "2-digit" }).format(new Date()); } catch { return ""; }
+  })();
+  $("#sched-now").textContent = usable.windows.length
+    ? `It's ${local} in ${tzLabel(s.timezone)}: this schedule is ${scheduleActive(usable, new Date()) ? "open" : "closed"} now.`
+    : "Add a time window.";
+}
+
+function openScheduleEditor(s) {
+  state.editingSchedule = s;
+  $("#sched-title").textContent = s ? `Edit: ${s.name}` : "New schedule";
+  $("#sched-error").textContent = "";
+  $("#s-name").value = s?.name || "";
+  $("#s-desc").value = s?.description || "";
+  fillTzSelect($("#s-tz"), s?.timezone || DEFAULT_TZ);
+  $("#s-windows").replaceChildren();
+  (s?.windows?.length ? s.windows : [{ days: ["mon", "tue", "wed", "thu", "fri"], from: "22:00", to: "06:00" }]).forEach((w) => windowRow(w));
+  refreshScheduleEditor();
+  if (!$("#sched-editor").open) $("#sched-editor").showModal();
+  guards.schedule.snapshot();
+}
+
+function wireScheduleEditor() {
+  guardEditor("schedule", $("#sched-editor"), $("#sched-cancel"), () => canonical(readScheduleForm()));
+  $("#new-schedule").addEventListener("click", () => openScheduleEditor(null));
+  $("#s-add-window").addEventListener("click", () => { windowRow({}); refreshScheduleEditor(); });
+  $("#s-tz").addEventListener("change", refreshScheduleEditor);
+  $("#sched-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const err = $("#sched-error");
+    const body = readScheduleForm();
+    const save = async (expected) => {
+      err.textContent = "";
+      try {
+        if (state.editingSchedule) await api("PUT", `/api/schedules/${state.editingSchedule.id}`, { ...body, ...(expected ? { updatedAt: expected } : {}) });
+        else await api("POST", "/api/schedules", body);
+        $("#sched-editor").close();
+        loadSchedules();
+      } catch (ex) {
+        if (ex.status === 409 && ex.data?.conflict) {
+          showConflict(err, ex, state.editingSchedule, {
+            overwrite: () => save(ex.data.current.updatedAt),
+            reload: () => openScheduleEditor(ex.data.current),
+          });
+        } else err.textContent = ex.message;
+      }
+    };
+    save(state.editingSchedule?.updatedAt);
+  });
+}
+
+async function deleteSchedule(s) {
+  const yes = await confirmDialog({
+    title: "Delete this schedule?",
+    message: [h("strong", {}, s.name), " will be removed."],
+    confirmLabel: "Delete schedule", danger: true,
+  });
+  if (!yes) return;
+  try {
+    await api("DELETE", `/api/schedules/${s.id}`);
+  } catch (e) {
+    await infoDialog(`Can't delete “${s.name}”`, e.data?.usedBy ? ["Rules still use it: ", e.data.usedBy.map((r) => r.name).join(", "), ". Pick another schedule (or Any time) in those rules first."] : e.message);
+  }
+  loadSchedules();
+}

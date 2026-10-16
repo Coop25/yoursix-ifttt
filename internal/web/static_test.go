@@ -7,7 +7,7 @@ import (
 
 func TestStaticFilesRevalidate(t *testing.T) {
 	srv, _ := newTestServer(t, false)
-	for _, p := range []string{"/", "/app.js", "/app.css", "/favicon.svg"} {
+	for _, p := range []string{"/", "/app.js", "/logic.js", "/app.css", "/favicon.svg"} {
 		resp, err := http.Get(srv.URL + p)
 		if err != nil {
 			t.Fatal(err)
