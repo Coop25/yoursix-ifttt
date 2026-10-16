@@ -3,10 +3,14 @@
 // Loaded before the real app.js. It replaces window.fetch (for /api, /auth
 // and /ui paths) and window.EventSource (for the live stream) with an
 // in-memory imitation of the Go server: rules with triggers and filters,
-// cooldowns and "ignore while running", saved requests with parameters,
+// cooldowns and "ignore while running", saved actions with parameters,
 // write-only secrets, and runs that step through their actions in real
 // time (delays count down; HTTP calls are simulated). Nothing leaves the
 // browser, and reloading the page resets everything.
+//
+// It mirrors the Go server by hand, so API and engine changes usually need a
+// matching change here: see "Keeping the demo in step" in the README. Shared
+// pure logic lives in internal/web/static/logic.js instead of being copied.
 (() => {
   "use strict";
 
@@ -60,7 +64,7 @@
   // ---------- state ----------
   const S = {
     rules: [], requests: [], secrets: [], events: [], nextRule: 1, nextRequest: 1, nextEvent: 1, nextRun: 1,
-    lastFired: {}, lastFinished: {}, running: {},
+    lastFired: {}, lastFinished: {}, running: {}, history: [], nextRev: 1, schedules: [], nextSchedule: 1,
   };
   const stamp = { createdAt: iso(now() - 86400e3 * 3), updatedAt: iso(now() - 3600e3), updatedBy: ME.id, updatedByName: ME.displayName };
 
@@ -78,6 +82,16 @@
     params: [{ name: "entity", default: "light.porch", description: "Light entity ID" }],
     request: { type: "http", method: "POST", url: "http://homeassistant.local:8123/api/services/light/turn_on", headers: { Authorization: 'Bearer {{ secret "HOME_HUB_TOKEN" }}' }, body: '{"entity_id": {{ json .params.entity }}}', timeoutSeconds: 10 },
   });
+  const alert = addRequest({
+    name: "Security channel alert", description: "Posts to the #security Discord channel",
+    params: [{ name: "headline", default: "Heads up", description: "Bold first line" }],
+    request: { type: "discord", webhookUrl: "", message: "**{{ .params.headline }}**: {{ .event.eventDescription }} on {{ .data.deviceName }} ({{ .data.siteName }})", discord: { username: "YourSix", silent: false } },
+  });
+  addRequest({ name: "Camera settle time", description: "Wait for a PTZ move to finish", request: { type: "delay", delayMillis: 8000 } });
+
+  function addSchedule(s) { const v = { id: S.nextSchedule++, description: "", timezone: "America/Chicago", ...stamp, ...s }; S.schedules.push(v); return v; }
+  const weeknights = addSchedule({ name: "Weeknights", description: "After hours on work days", windows: [{ days: ["mon", "tue", "wed", "thu", "fri"], from: "22:00", to: "06:00" }] });
+  addSchedule({ name: "Business hours", windows: [{ days: ["mon", "tue", "wed", "thu", "fri"], from: "08:00", to: "17:00" }, { days: ["sat"], from: "09:00", to: "12:00" }] });
 
   function addRule(r) {
     const v = { id: S.nextRule++, enabled: true, cooldownSeconds: 0, cooldownFrom: "start", skipIfRunning: false, ...stamp, ...r };
@@ -94,6 +108,9 @@
       { type: "request", requestId: ptz.id, params: { preset: "Driveway" } },
       { type: "http", name: "Notify home hub", method: "POST", url: "http://homeassistant.local:8123/api/webhook/yoursix", body: '{"source": {{ json .data.deviceName }}, "event": {{ json .event.key }}}', continueOnError: true },
     ],
+    onFailure: [
+      { type: "request", requestId: alert.id, params: { headline: "⚠️ {{ .rule }}: {{ .failure.step }} failed" } },
+    ],
   });
   addRule({
     name: "Front door opened → porch light on", skipIfRunning: true,
@@ -107,13 +124,48 @@
   addRule({
     name: "Camera offline → Discord alert", cooldownSeconds: 900,
     trigger: { topics: ["device"], codes: ["disconnected"] },
-    actions: [{ type: "discord", name: "Alert", message: "⚠️ {{ .data.deviceName }} at {{ .data.siteName }} went offline" }],
+    actions: [{ type: "request", requestId: alert.id, params: { headline: "⚠️ Camera offline" } }],
   });
   addRule({
     name: "West entrance armed → siren output", enabled: false, cooldownSeconds: 300, cooldownFrom: "finish",
+    scheduleId: weeknights.id,
     trigger: { topics: ["alarmgroup"], codes: ["armed"], filters: [{ field: "groupName", op: "contains", value: "west" }] },
     actions: [{ type: "http", name: "Siren output on (VAPIX)", url: "http://192.168.1.51/axis-cgi/io/port.cgi?action=1:/", auth: "digest", username: "root", password: '{{ secret "SIREN_PASS" }}' }],
   });
+
+  // ---------- edit history ----------
+  // Like the server: snapshots hold an item's editable content only, with
+  // sorted keys, and saves that change nothing aren't logged.
+  const VOLATILE = ["id", "createdAt", "updatedAt", "updatedBy", "updatedByName", "lastFiredAt", "lastFinishedAt", "running", "activeRuns", "usedBy"];
+  function sortKeys(v) {
+    if (Array.isArray(v)) return v.map(sortKeys);
+    if (v && typeof v === "object") return Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys(v[k])]));
+    return v;
+  }
+  function snapshot(item) {
+    const o = clone(item);
+    VOLATILE.forEach((k) => delete o[k]);
+    return sortKeys(o);
+  }
+  function record(kind, item, change, by = ME, at = iso()) {
+    const snap = snapshot(item);
+    const last = S.history.findLast((r) => r.kind === kind && r.itemId === item.id);
+    if (change === "updated" && last && JSON.stringify(last.snapshot) === JSON.stringify(snap)) return;
+    S.history.push({ id: S.nextRev++, kind, itemId: item.id, name: item.name, change, snapshot: snap, byId: by.id, byName: by.displayName, at });
+  }
+  // Seed history: everything created three days ago, and the first rule
+  // tuned since by someone else, so there's a diff to look at.
+  const ALEX = { id: "alex", displayName: "Alex (ops)" };
+  for (const sr of S.requests) record("action", sr, "created", ME, stamp.createdAt);
+  for (const sc of S.schedules) record("schedule", sc, "created", ME, stamp.createdAt);
+  for (const r of S.rules) {
+    if (r.id !== 1) { record("rule", r, "created", ME, stamp.createdAt); continue; }
+    const first = clone(r);
+    first.cooldownSeconds = 60;
+    first.actions = first.actions.filter((a) => a.type !== "request").map((a) => (a.type === "delay" ? { ...a, delayMillis: 8000 } : a));
+    record("rule", first, "created", ALEX, iso(now() - 86400e3 * 3));
+    record("rule", r, "updated", ME, iso(now() - 3600e3));
+  }
 
   // ---------- templates (a small subset of Go text/template) ----------
   function lookup(path, data) {
@@ -142,7 +194,7 @@
   }
   function applyFn(fn, v, secretsUsed) {
     switch (fn) {
-      case "secret": secretsUsed.add(String(v)); return "••••••"; // values never leave the server; masked here too
+      case "secret": secretsUsed.add(String(v)); return `‹secret ${v}›`; // values never leave the server; masked here too
       case "json": return JSON.stringify(v ?? null);
       case "urlquery": return encodeURIComponent(v ?? "");
       case "lower": return String(v ?? "").toLowerCase();
@@ -254,7 +306,7 @@
 
   function stepLabel(a) {
     if (a.name) return a.name;
-    if (a.type === "request") return S.requests.find((x) => x.id === a.requestId)?.name || "Saved request";
+    if (a.type === "request") return S.requests.find((x) => x.id === a.requestId)?.name || "Saved action";
     return { delay: "Delay", discord: "Discord message" }[a.type] || "HTTP request";
   }
 
@@ -269,42 +321,70 @@
     const missing = [...used].filter((n) => !S.secrets.some((s) => s.name === n));
     if (missing.length) throw new Error(`secret "${missing[0]}" is not available to this rule`);
     await sleep(120 + Math.random() * 380);
+    // Lets the demo show failures (and on-failure actions): any host with
+    // "offline" in it doesn't answer.
+    if (/^\w+:\/\/[^/]*offline/i.test(url)) throw new Error(`dial tcp: connect: connection refused (${url.split("/")[2]} is offline in this demo)`);
     res.status = 200;
     res.response = "OK";
   }
 
+  // runStep runs one plain (non-saved) action.
+  async function runStep(a, data, res) {
+    if (a.type === "delay") return sleep(a.delayMillis);
+    if (a.type === "discord") {
+      res.target = "discord webhook";
+      render(a.message, data);
+      render(a.webhookUrl, data);
+      await sleep(150 + Math.random() * 200);
+      res.status = 204;
+      return;
+    }
+    return simulateHTTP(a, data, res);
+  }
+
+  // runActions runs a rule's actions, then its on-failure actions if a step
+  // failed (appended to the run's steps, marked onFailure).
   async function runActions(e, run, rule) {
     const data = {
       event: { ...e.payload, key: `${e.payload.eventTopic}:${e.payload.eventCode}` },
       data: e.payload.eventData, rule: rule.name,
     };
+    const ok = await runList(e, run, rule.actions, data, 0);
+    if (!ok && rule.onFailure?.length) {
+      const f = run.steps.find((s) => !s.ok && !s.skipped && s.error);
+      data.failure = { step: f ? f.name || f.type : "", stepNumber: f ? f.index + 1 : 0, error: f?.error || "" };
+      await runList(e, run, rule.onFailure, data, rule.actions.length, true);
+    }
+    run.status = ok ? "ok" : "failed";
+    run.finishedAt = iso();
+    delete run.current;
+  }
+
+  async function runList(e, run, list, data, offset, onFailure = false) {
     let stopped = false, ok = true;
-    for (const [i, a] of rule.actions.entries()) {
-      const res = { index: i, type: a.type, name: a.name || "" };
+    for (const [n, a] of list.entries()) {
+      const i = n + offset;
+      const res = { index: i, type: a.type, name: a.name || "", ...(onFailure ? { onFailure: true } : {}) };
       if (stopped) { res.skipped = true; run.steps.push(res); continue; }
       const start = now();
       run.current = { index: i, type: a.type, name: stepLabel(a), startedAt: iso(start) };
-      if (a.type === "delay") run.current.until = iso(start + a.delayMillis);
+      const saved = a.type === "request" ? S.requests.find((x) => x.id === a.requestId) : null;
+      const waitMs = a.type === "delay" ? a.delayMillis : saved?.request.type === "delay" ? saved.request.delayMillis : 0;
+      if (waitMs) run.current.until = iso(start + waitMs);
       changed(e);
       try {
-        if (a.type === "delay") await sleep(a.delayMillis);
-        else if (a.type === "discord") {
-          res.target = "discord webhook";
-          render(a.message, data);
-          await sleep(150 + Math.random() * 200);
-          res.status = 204;
-        } else if (a.type === "request") {
-          const sr = S.requests.find((x) => x.id === a.requestId);
-          if (!sr) throw new Error(`saved request #${a.requestId}: not found`);
+        if (a.type === "request") {
+          const sr = saved;
+          if (!sr) throw new Error(`saved action #${a.requestId}: not found`);
           if (!res.name) res.name = sr.name;
           const params = {};
           for (const p of sr.params) params[p.name] = p.default || "";
           for (const [k, v] of Object.entries(a.params || {})) if (v !== "") params[k] = render(v, data);
           const need = sr.params.find((p) => !p.default && !params[p.name]);
-          if (need) throw new Error(`saved request "${sr.name}" needs a value for "${need.name}"`);
-          await simulateHTTP(sr.request, { ...data, params }, res);
+          if (need) throw new Error(`saved action "${sr.name}" needs a value for "${need.name}"`);
+          await runStep(sr.request, { ...data, params }, res);
         } else {
-          await simulateHTTP(a, data, res);
+          await runStep(a, data, res);
         }
         res.ok = true;
       } catch (err) {
@@ -316,9 +396,7 @@
       run.steps.push(res);
       changed(e);
     }
-    run.status = ok ? "ok" : "failed";
-    run.finishedAt = iso();
-    delete run.current;
+    return ok;
   }
 
   function startRun(e, rule, { test = false } = {}) {
@@ -343,6 +421,9 @@
     return e;
   }
 
+  // Schedules are checked with scheduleActive from logic.js (loaded by the
+  // page), the same code the UI uses.
+
   function dispatch(payload, opts) {
     const e = insertEvent(payload, opts);
     if (!e) return { eventRow: 0, duplicate: true, matchedRules: [] };
@@ -350,7 +431,8 @@
     for (const r of S.rules.filter((x) => x.enabled)) {
       if (!matches(r.trigger, payload)) continue;
       matched.push(r.id);
-      const skip = claim(r);
+      const sched = r.scheduleId && S.schedules.find((s) => s.id === r.scheduleId);
+      const skip = sched && !scheduleActive(sched, new Date()) ? "offhours" : claim(r);
       if (skip) e.runs.push({ id: S.nextRun++, eventRow: e.id, ruleId: r.id, ruleName: r.name, status: skip, startedAt: iso(), finishedAt: iso(), steps: [], totalSteps: r.actions.length });
       else startRun(e, r);
     }
@@ -419,22 +501,106 @@
   function requestView(sr) {
     return { ...clone(sr), usedBy: S.rules.filter((r) => r.actions.some((a) => a.type === "request" && a.requestId === sr.id)).map((r) => ({ id: r.id, name: r.name })) };
   }
+  function scheduleView(sc) {
+    return { ...clone(sc), usedBy: S.rules.filter((r) => r.scheduleId === sc.id).map((r) => ({ id: r.id, name: r.name })) };
+  }
+  function validateSchedule(s) {
+    if (!String(s.name || "").trim()) return "name is required";
+    if (!s.windows?.length) return "add at least one time window";
+    for (const [i, w] of s.windows.entries()) {
+      if (!w.from !== !w.to) return `window ${i + 1}: set both a start and an end time, or neither`;
+      if (w.from && w.from === w.to) return `window ${i + 1}: start and end are the same time; clear both times for all day`;
+    }
+    return "";
+  }
+  function validateSaved(body) {
+    if (!String(body.name || "").trim()) return "name is required";
+    const a = body.request || {};
+    if (!["http", "delay", "discord", undefined].includes(a.type)) return `a saved action can't be of type "${a.type}"`;
+    return validateRule({ name: "x", actions: [{ ...a, type: a.type || "http" }] }).replace(/^action 1: /, "");
+  }
   function validateRule(r) {
     if (!String(r.name || "").trim()) return "name is required";
     if (!r.actions || !r.actions.length) return "at least one action is required";
+    if (r.scheduleId && !S.schedules.some((s) => s.id === r.scheduleId)) return `schedule #${r.scheduleId} doesn't exist`;
     for (const [i, a] of r.actions.entries()) {
       if (a.type === "http" && !a.url) return `action ${i + 1}: url is required`;
       if (a.type === "delay" && !(a.delayMillis > 0)) return `action ${i + 1}: delayMillis must be between 1 and 600000`;
       if (a.type === "discord" && !a.message && !a.discord?.embeds?.length) return `action ${i + 1}: a message or an embed is required`;
       if (a.type === "request") {
         const sr = S.requests.find((x) => x.id === a.requestId);
-        if (!sr) return `action ${i + 1}: choose a saved request`;
+        if (!sr) return `action ${i + 1}: choose a saved action`;
         const need = sr.params.find((p) => !p.default && !(a.params || {})[p.name]);
-        if (need) return `action ${i + 1}: saved request "${sr.name}" needs a value for "${need.name}"`;
+        if (need) return `action ${i + 1}: saved action "${sr.name}" needs a value for "${need.name}"`;
       }
     }
     return "";
   }
+  function conflict(what, item, current) {
+    return json(409, { error: `${item.updatedByName || "Someone else"} changed this ${what} at ${item.updatedAt}, after you opened it`, conflict: true, current });
+  }
+
+  // previewAction mirrors actions.Runner.Preview.
+  function previewAction(a, data) {
+    const out = [];
+    const add = (field, t) => { if (t) out.push({ field, value: render(t, data) }); };
+    if (a.type === "http") {
+      add("URL", a.url);
+      Object.keys(a.headers || {}).sort().forEach((k) => add(`Header ${k}`, a.headers[k]));
+      add("Body", a.body);
+      add("Password", a.password);
+    } else if (a.type === "discord") {
+      add("Webhook URL", a.webhookUrl);
+      add("Message", a.message);
+      const d = a.discord || {};
+      add("Username", d.username);
+      add("Avatar URL", d.avatarUrl);
+      add("Thread name", d.threadName);
+      (d.embeds || []).forEach((e, i) => {
+        const p = `Embed ${i + 1} `;
+        add(p + "title", e.title); add(p + "link", e.url); add(p + "description", e.description); add(p + "timestamp", e.timestamp);
+        add(p + "author", e.authorName); add(p + "footer", e.footerText); add(p + "image", e.imageUrl); add(p + "thumbnail", e.thumbnailUrl);
+        (e.fields || []).forEach((f) => add(`${p}field ${f.name}`, f.value));
+      });
+    } else if (a.type === "request") {
+      const sr = S.requests.find((x) => x.id === a.requestId);
+      if (!sr) return [{ field: "Saved action", error: `saved action #${a.requestId}: not found` }];
+      const params = {};
+      for (const p of sr.params) params[p.name] = p.default || "";
+      for (const [k, v] of Object.entries(a.params || {})) if (v !== "") params[k] = render(v, data);
+      for (const p of sr.params) out.push({ field: `Parameter ${p.name}`, value: params[p.name] });
+      return out.concat(previewAction(sr.request, { ...data, params }));
+    }
+    return out;
+  }
+
+  // Event search, like internal/store: free words and "phrases" match
+  // anywhere; key:value matches one field.
+  function parseSearch(s) {
+    const out = [];
+    const re = /(?:([A-Za-z_]\w*):(?=\S))?(?:"([^"]*)"?|(\S+))/g;
+    for (const m of s.matchAll(re)) {
+      const value = (m[2] ?? m[3] ?? "").trim();
+      if (value) out.push({ key: m[1] || "", value: value.toLowerCase() });
+    }
+    return out;
+  }
+  function termMatches(t, e) {
+    const has = (v) => String(v ?? "").toLowerCase().includes(t.value);
+    const d = e.payload.eventData || {};
+    const key = t.key.toLowerCase();
+    switch (key) {
+      case "": return has([`${e.payload.eventTopic}:${e.payload.eventCode}`, e.payload.eventDescription, e.sourceIp, JSON.stringify(e.payload), ...e.runs.map((r) => r.ruleName)].join("\n"));
+      case "topic": return has(e.payload.eventTopic);
+      case "code": return has(e.payload.eventCode);
+      case "rule": return e.runs.some((r) => has(r.ruleName));
+      case "status": return e.runs.some((r) => r.status === t.value);
+      case "ip": return has(e.sourceIp);
+    }
+    const field = { device: "deviceName", site: "siteName", group: "groupName", peripheral: "peripheralName" }[key] || t.key;
+    return has(d[field]) || `${e.payload.eventTopic}:${e.payload.eventCode}`.includes(`${key}:${t.value}`);
+  }
+
   function normalizeRule(body, base = {}) {
     const r = { ...base, ...body };
     r.name = String(r.name || "").trim();
@@ -455,19 +621,28 @@
       const bad = validateRule(r);
       if (bad) return err(400, bad);
       S.nextRule++; S.rules.push(r);
+      record("rule", r, "created");
       return json(201, ruleView(r));
     }],
     ["GET", /^\/api\/rules\/(\d+)$/, (m) => { const r = S.rules.find((x) => x.id === +m[1]); return r ? json(200, ruleView(r)) : err(404, "not found"); }],
     ["PUT", /^\/api\/rules\/(\d+)$/, (m, body) => {
       const i = S.rules.findIndex((x) => x.id === +m[1]);
       if (i < 0) return err(404, "not found");
+      if (body.updatedAt && body.updatedAt !== S.rules[i].updatedAt) return conflict("rule", S.rules[i], ruleView(S.rules[i]));
       const r = normalizeRule(body, { id: S.rules[i].id, createdAt: S.rules[i].createdAt, lastFiredAt: S.rules[i].lastFiredAt });
       const bad = validateRule(r);
       if (bad) return err(400, bad);
       S.rules[i] = r;
+      record("rule", r, "updated");
       return json(200, ruleView(r));
     }],
-    ["DELETE", /^\/api\/rules\/(\d+)$/, (m) => { S.rules = S.rules.filter((x) => x.id !== +m[1]); return json(204); }],
+    ["DELETE", /^\/api\/rules\/(\d+)$/, (m) => {
+      const r = S.rules.find((x) => x.id === +m[1]);
+      if (!r) return err(404, "not found");
+      S.rules = S.rules.filter((x) => x !== r);
+      record("rule", r, "deleted");
+      return json(204);
+    }],
     ["POST", /^\/api\/rules\/(\d+)\/test$/, (m) => {
       const r = S.rules.find((x) => x.id === +m[1]);
       if (!r) return err(404, "not found");
@@ -484,31 +659,67 @@
       return err(404, "not found");
     }],
 
+    ["GET", /^\/api\/schedules$/, () => json(200, [...S.schedules].sort((a, b) => a.name.localeCompare(b.name)).map(scheduleView))],
+    ["POST", /^\/api\/schedules$/, (_, body) => {
+      const bad = validateSchedule(body);
+      if (bad) return err(400, bad);
+      const sc = addSchedule({ ...body, timezone: body.timezone || "America/Chicago", createdAt: iso(), updatedAt: iso() });
+      record("schedule", sc, "created");
+      return json(201, scheduleView(sc));
+    }],
+    ["GET", /^\/api\/schedules\/(\d+)$/, (m) => { const sc = S.schedules.find((x) => x.id === +m[1]); return sc ? json(200, scheduleView(sc)) : err(404, "not found"); }],
+    ["PUT", /^\/api\/schedules\/(\d+)$/, (m, body) => {
+      const i = S.schedules.findIndex((x) => x.id === +m[1]);
+      if (i < 0) return err(404, "not found");
+      const bad = validateSchedule(body);
+      if (bad) return err(400, bad);
+      if (body.updatedAt && body.updatedAt !== S.schedules[i].updatedAt) return conflict("schedule", S.schedules[i], scheduleView(S.schedules[i]));
+      S.schedules[i] = { ...S.schedules[i], ...body, timezone: body.timezone || "America/Chicago", id: S.schedules[i].id, updatedAt: iso(), updatedBy: ME.id, updatedByName: ME.displayName };
+      record("schedule", S.schedules[i], "updated");
+      return json(200, scheduleView(S.schedules[i]));
+    }],
+    ["DELETE", /^\/api\/schedules\/(\d+)$/, (m) => {
+      const sc = S.schedules.find((x) => x.id === +m[1]);
+      if (!sc) return err(404, "not found");
+      const used = scheduleView(sc).usedBy;
+      if (used.length) return json(409, { error: `still used by ${used.length} rule(s); remove it from them first`, usedBy: used });
+      S.schedules = S.schedules.filter((x) => x !== sc);
+      record("schedule", sc, "deleted");
+      return json(204);
+    }],
+
     ["GET", /^\/api\/requests$/, () => json(200, [...S.requests].sort((a, b) => a.name.localeCompare(b.name)).map(requestView))],
     ["POST", /^\/api\/requests$/, (_, body) => {
-      if (!String(body.name || "").trim()) return err(400, "name is required");
-      if (!body.request?.url) return err(400, "url is required");
-      const sr = addRequest({ ...body, request: { ...body.request, type: "http" }, createdAt: iso(), updatedAt: iso() });
+      const bad = validateSaved(body);
+      if (bad) return err(400, bad);
+      const sr = addRequest({ ...body, request: { ...body.request, type: body.request.type || "http" }, createdAt: iso(), updatedAt: iso() });
+      record("action", sr, "created");
       return json(201, requestView(sr));
     }],
     ["GET", /^\/api\/requests\/(\d+)$/, (m) => { const sr = S.requests.find((x) => x.id === +m[1]); return sr ? json(200, requestView(sr)) : err(404, "not found"); }],
     ["PUT", /^\/api\/requests\/(\d+)$/, (m, body) => {
       const i = S.requests.findIndex((x) => x.id === +m[1]);
       if (i < 0) return err(404, "not found");
-      if (!String(body.name || "").trim()) return err(400, "name is required");
-      S.requests[i] = { ...S.requests[i], ...body, request: { ...body.request, type: "http" }, id: S.requests[i].id, updatedAt: iso() };
+      const bad = validateSaved(body);
+      if (bad) return err(400, bad);
+      if (body.updatedAt && body.updatedAt !== S.requests[i].updatedAt) return conflict("saved action", S.requests[i], requestView(S.requests[i]));
+      S.requests[i] = { ...S.requests[i], ...body, request: { ...body.request, type: body.request.type || "http" }, id: S.requests[i].id, updatedAt: iso(), updatedBy: ME.id, updatedByName: ME.displayName };
+      record("action", S.requests[i], "updated");
       return json(200, requestView(S.requests[i]));
     }],
     ["DELETE", /^\/api\/requests\/(\d+)$/, (m) => {
       const used = requestView(S.requests.find((x) => x.id === +m[1]) || { id: -1 }).usedBy;
       if (used.length) return json(409, { error: `still used by ${used.length} rule(s): [${used.map((r) => r.name).join(" ")}]; remove it from them first`, usedBy: used });
-      S.requests = S.requests.filter((x) => x.id !== +m[1]);
+      const sr = S.requests.find((x) => x.id === +m[1]);
+      if (!sr) return err(404, "not found");
+      S.requests = S.requests.filter((x) => x !== sr);
+      record("action", sr, "deleted");
       return json(204);
     }],
     ["POST", /^\/api\/requests\/(\d+)\/test$/, (m, body) => {
       const sr = S.requests.find((x) => x.id === +m[1]);
       if (!sr) return err(404, "not found");
-      const rule = { id: 0, name: `Request test: ${sr.name}`, actions: [{ type: "request", requestId: sr.id, params: body?.params || {} }] };
+      const rule = { id: 0, name: `Saved action test: ${sr.name}`, actions: [{ type: "request", requestId: sr.id, params: body?.params || {} }] };
       const ev = sample("device", "vmd");
       ev.eventId = "";
       const e = insertEvent(ev, { test: true, sourceIp: "test:demo" });
@@ -519,7 +730,35 @@
     ["GET", /^\/api\/events$/, (_, __, url) => {
       const limit = Math.min(+url.searchParams.get("limit") || 50, 200);
       const before = +url.searchParams.get("before") || 0;
-      return json(200, S.events.filter((e) => !before || e.id < before).slice(0, limit).map((e) => eventView(e, false)));
+      const outcome = url.searchParams.get("outcome") || "";
+      const outcomes = {
+        "": () => true, matched: (e) => e.runs.length > 0, nomatch: (e) => !e.runs.length, test: (e) => e.test,
+        ok: (e) => e.runs.some((r) => r.status === "ok"), failed: (e) => e.runs.some((r) => r.status === "failed"),
+        skipped: (e) => e.runs.some((r) => ["cooldown", "busy", "offhours"].includes(r.status)),
+      };
+      if (!outcomes[outcome]) return err(400, `unknown outcome "${outcome}"`);
+      const since = Date.parse(url.searchParams.get("since") || "") || 0;
+      const until = Date.parse(url.searchParams.get("until") || "") || Infinity;
+      const terms = parseSearch(url.searchParams.get("q") || "");
+      return json(200, S.events.filter((e) => (!before || e.id < before) && terms.every((t) => termMatches(t, e)) && outcomes[outcome](e)
+        && Date.parse(e.receivedAt) >= since && Date.parse(e.receivedAt) < until).slice(0, limit).map((e) => eventView(e, false)));
+    }],
+    ["POST", /^\/api\/preview$/, (_, body) => {
+      const r = body?.rule || {};
+      const trigger = { topics: [], codes: [], filters: [], ...(r.trigger || {}) };
+      let [topic, code] = [trigger.topics[0] || "device", trigger.codes[0] || "vmd"];
+      if (code.includes(":")) [topic, code] = code.split(":");
+      const ev = sample(topic, code);
+      const data = { event: { ...ev, key: `${ev.eventTopic}:${ev.eventCode}` }, data: ev.eventData, rule: r.name };
+      const actions = (r.actions || []).map((a) => previewAction(a, data));
+      data.failure = { step: r.actions?.[0]?.name || "Action 1", stepNumber: 1, error: "sample error: connection refused" };
+      return json(200, { event: ev, matchesTrigger: matches(trigger, ev), actions, onFailure: (r.onFailure || []).map((a) => previewAction(a, data)) });
+    }],
+    ["GET", /^\/api\/history$/, (_, __, url) => {
+      const p = url.searchParams;
+      const limit = Math.min(+p.get("limit") || 100, 500);
+      return json(200, S.history.filter((r) => (!p.get("kind") || r.kind === p.get("kind")) && (!+p.get("id") || r.itemId === +p.get("id")) && (!+p.get("before") || r.id < +p.get("before")))
+        .sort((a, b) => b.at.localeCompare(a.at) || b.id - a.id).slice(0, limit));
     }],
     ["GET", /^\/api\/events\/(\d+)$/, (m) => { const e = S.events.find((x) => x.id === +m[1]); return e ? json(200, eventView(e, true)) : err(404, "not found"); }],
     ["POST", /^\/api\/events\/(\d+)\/replay$/, (m) => {
@@ -534,7 +773,7 @@
 
     ["GET", /^\/api\/secrets$/, () => json(200, { enabled: true, secrets: S.secrets.map((s) => ({ ...s, usedBy: [
       ...S.rules.filter((r) => JSON.stringify(r.actions).includes(`secret \\"${s.name}\\"`)).map((r) => r.name),
-      ...S.requests.filter((sr) => JSON.stringify(sr.request).includes(`secret \\"${s.name}\\"`)).map((sr) => `Request: ${sr.name}`),
+      ...S.requests.filter((sr) => JSON.stringify(sr.request).includes(`secret \\"${s.name}\\"`)).map((sr) => `Saved action: ${sr.name}`),
     ] })) })],
     ["PUT", /^\/api\/secrets\/([^/]+)$/, (m, body) => {
       const name = decodeURIComponent(m[1]).toUpperCase();
@@ -597,6 +836,7 @@
   // ---------- banner ----------
   document.addEventListener("DOMContentLoaded", () => {
     const bar = document.createElement("div");
+    bar.id = "demo-banner";
     bar.setAttribute("role", "note");
     Object.assign(bar.style, {
       background: "#5865f2", color: "#fff", font: "13px/1.4 system-ui, sans-serif", padding: "7px 16px", textAlign: "center",
