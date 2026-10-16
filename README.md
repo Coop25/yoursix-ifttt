@@ -94,7 +94,7 @@ A rule has an **If** part, a list of **Then** actions, and an optional cooldown.
 
 By default a failing action stops the rule. Set `continueOnError` on an action to keep going after it fails.
 
-**If anything fails** (`"onFailure": [...]`): actions to run after a step fails, e.g. a Discord alert or a saved action. They run once, after the rule's own actions, and their templates also see `{{ .failure.step }}` (the failed step's name), `{{ .failure.stepNumber }}` and `{{ .failure.error }}`. Their results appear in the run under *If anything fails*; the run still counts as failed.
+**If anything fails** (`"onFailure": [...]`): actions to run after a step fails, e.g. a Discord alert or a saved action. They run once, after the rule's own actions, and only for a failure that stopped the rule: a step set to continue on error that fails doesn't trigger them. Their templates also see `{{ .failure.step }}` (the failed step's name), `{{ .failure.stepNumber }}` and `{{ .failure.error }}`. Their results appear in the run under *If anything fails*; the run still counts as failed.
 
 **Discord options.** Besides the message, a `discord` action can set:
 
@@ -147,7 +147,7 @@ Rules use one with the **+ Saved action** button. Pick the saved action, then fi
 
 ### Schedules
 
-The **Schedules** tab holds named sets of days and hours, like *Weeknights: Mon–Fri 22:00–06:00* or *Business hours: Mon–Fri 08:00–17:00 and Sat 09:00–12:00*. A rule picks one under **Only run during**, and runs only while one of its time windows is open; other events are logged as `offhours`. Editing a schedule updates every rule that uses it, and a schedule can't be deleted while rules use it.
+The **Schedules** tab holds named sets of days and hours, like *Weeknights: Mon–Fri 22:00–06:00* or *Business hours: Mon–Fri 08:00–17:00 and Sat 09:00–12:00*. A rule picks one under **Only run during**, and runs only for events that happened while one of its time windows was open (by the event's `eventOccurred`, or the time it arrived if that's missing or in the future, so a replayed event keeps its original hours); other events are logged as `offhours`. Editing a schedule updates every rule that uses it, and a schedule can't be deleted while rules use it.
 
 Windows add together: a schedule is open while any of its windows is, so overlapping windows are fine. The editor shows a **week at a glance** (all windows combined, with a marker at the current time), flags a window that other windows already cover completely (it adds nothing, so you can remove it), and refuses a window whose start and end are the same time (clear both for all day). Schedule cards show the same weekly view.
 

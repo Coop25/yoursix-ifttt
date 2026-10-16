@@ -365,9 +365,11 @@
       data: e.payload.eventData, rule: rule.name,
     };
     const ok = await runList(e, run, rule.actions, data, 0);
-    if (!ok && rule.onFailure?.length) {
-      const f = run.steps.find((s) => !s.ok && !s.skipped && s.error);
-      data.failure = { step: f ? f.name || f.type : "", stepNumber: f ? f.index + 1 : 0, error: f?.error || "" };
+    // Like engine.FailureData: failures of continue-on-error steps were
+    // chosen to be ignored and don't trigger on-failure actions.
+    const f = run.steps.find((s) => !s.ok && !s.skipped && s.error && !rule.actions[s.index]?.continueOnError);
+    if (!ok && f && rule.onFailure?.length) {
+      data.failure = { step: f.name || f.type, stepNumber: f.index + 1, error: f.error };
       await runList(e, run, rule.onFailure, data, rule.actions.length, true);
     }
     run.status = ok ? "ok" : "failed";
@@ -437,7 +439,12 @@
   }
 
   // Schedules are checked with scheduleActive from logic.js (loaded by the
-  // page), the same code the UI uses.
+  // page), the same code the UI uses, at the event's own time like
+  // engine.eventTime: eventOccurred, or now if it's missing or in the future.
+  function eventTime(payload) {
+    const t = Date.parse(payload.eventOccurred);
+    return new Date(Number.isFinite(t) && t <= now() ? t : now());
+  }
 
   function dispatch(payload, opts) {
     const e = insertEvent(payload, opts);
@@ -447,7 +454,7 @@
       if (!matches(r.trigger, payload)) continue;
       matched.push(r.id);
       const sched = r.scheduleId && S.schedules.find((s) => s.id === r.scheduleId);
-      const skip = sched && !scheduleActive(sched, new Date()) ? "offhours" : claim(r);
+      const skip = sched && !scheduleActive(sched, eventTime(payload)) ? "offhours" : claim(r);
       if (skip) e.runs.push({ id: S.nextRun++, eventRow: e.id, ruleId: r.id, ruleName: r.name, status: skip, startedAt: iso(), finishedAt: iso(), steps: [], totalSteps: r.actions.length });
       else startRun(e, r);
     }
