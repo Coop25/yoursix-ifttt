@@ -15,25 +15,46 @@ A small Go service that receives [YourSix event webhooks](https://docs.yoursix.c
 
 ## Screenshots
 
-**Event log.** Every webhook is recorded with the rules it triggered, and new events and rule results appear live. Expand one to see each action's result. **Matrix ↗** opens the event's camera in the YourSix Matrix, playing back from when it happened.
+**Event log.** Every webhook is recorded with the rules it triggered, and new events and rule results appear live. Expand one to see each action's result, including any **If anything fails** actions. **Matrix ↗** opens the event's camera in the YourSix Matrix, playing back from when it happened. Search by code, device, site, rule name, source IP or anything in the payload, or by field (`device:CAM-01 site:"Head office" rule:gate status:failed`), and filter by outcome and date range. **Search tips** under the box lists every field.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/events-dark.png">
-  <img alt="Live event log: a running rule expanded with its current step and countdown, finished steps, Open in Matrix and Replay buttons, and ok, busy, cooldown and no-match outcomes" src="docs/screenshots/events-light.png">
+  <img alt="Event log searched for device:CAM-01, with a failed run expanded: the first step's connection error, the skipped steps, and the If anything fails alert that ran" src="docs/screenshots/events-light.png">
 </picture>
 
-**Rule editor.** Click a rule to open it. Pick topics and event codes, add filters, choose when to ignore events, and build the action list from HTTP requests, delays, Discord messages and saved requests. You can also switch to raw JSON.
+**Rule editor.** Click a rule to open it. Pick topics and event codes from dropdowns (each choice shows as a removable pill), add filters, choose when to ignore events and which schedule it runs during, and build the action list from HTTP requests, delays, Discord messages and saved actions. **Preview templates** shows what each URL, header, body and message renders to. You can also switch to raw JSON.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/editor-dark.png">
-  <img alt="Rule editor with ignore-while-running ticked, event code pickers, a filter, and actions: a saved request with its parameter, a delay and a Discord message" src="docs/screenshots/editor-light.png">
+  <img alt="Rule editor with a schedule picked, topic and event code pills, a filter, and a saved action whose template preview shows the rendered URL, a masked secret and the body" src="docs/screenshots/editor-light.png">
 </picture>
 
-**Saved requests.** Define a request once, with parameters, and reuse it from any rule.
+**Saved actions.** Set up an HTTP request, delay or Discord message once, with parameters, and reuse it from any rule.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/requests-dark.png">
-  <img alt="Saved requests: a PTZ preset call with digest auth and a required preset parameter, and a home-hub light call with a default entity, each listing the rules that use it" src="docs/screenshots/requests-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/actions-dark.png">
+  <img alt="Saved actions: a delay, a PTZ preset call with a required parameter, a home-hub light call and a Discord alert, each with its type and the rules that use it" src="docs/screenshots/actions-light.png">
+</picture>
+
+**Schedules.** Named days and hours that rules can run during, with a week at a glance and whether each is open now.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/schedules-dark.png">
+  <img alt="Schedules: Business hours (weekdays 08:00–17:00 and Saturday morning, open now) and Weeknights (22:00–06:00 overnight, closed now), each with a weekly timeline" src="docs/screenshots/schedules-light.png">
+</picture>
+
+The schedule editor combines every time window into one weekly view and points out windows that add nothing.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/schedule-editor-dark.png">
+  <img alt="Schedule editor in Central time with three windows, the last flagged as already covered by the others, and the combined week at a glance below" src="docs/screenshots/schedule-editor-light.png">
+</picture>
+
+**History.** Every change to a rule, saved action or schedule, with who made it and a diff against any other version.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/history-dark.png">
+  <img alt="History tab with an edit to a rule expanded: a line diff showing a longer delay, an added saved action and a shorter cooldown" src="docs/screenshots/history-light.png">
 </picture>
 
 **Secrets.** Encrypted, write-only, and private to each admin.
@@ -49,6 +70,8 @@ A small Go service that receives [YourSix event webhooks](https://docs.yoursix.c
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/setup-dark.png">
   <img alt="Setup tab showing the webhook URL and the event simulator" src="docs/screenshots/setup-light.png">
 </picture>
+
+The screenshots come from the demo build: `task screenshots` retakes all of them (it needs Chrome, Chromium or Edge).
 
 
 ## How rules work
@@ -67,9 +90,11 @@ A rule has an **If** part, a list of **Then** actions, and an optional cooldown.
 | `http` | Any method, URL, headers and body. Auth can be none, `basic`, or `digest` (Axis VAPIX default). Optional self-signed TLS, custom expected status codes, and a timeout. |
 | `delay` | Waits N ms between steps. |
 | `discord` | Posts a message and/or rich embeds to a Discord webhook (see below). |
-| `request` | Runs a **saved request** (see below) with values for its parameters. |
+| `request` | Runs a **saved action** (see below) with values for its parameters. |
 
 By default a failing action stops the rule. Set `continueOnError` on an action to keep going after it fails.
+
+**If anything fails** (`"onFailure": [...]`): actions to run after a step fails, e.g. a Discord alert or a saved action. They run once, after the rule's own actions, and only for a failure that stopped the rule: a step set to continue on error that fails doesn't trigger them. Their templates also see `{{ .failure.step }}` (the failed step's name), `{{ .failure.stepNumber }}` and `{{ .failure.error }}`. Their results appear in the run under *If anything fails*; the run still counts as failed.
 
 **Discord options.** Besides the message, a `discord` action can set:
 
@@ -104,17 +129,33 @@ URL, body, header values, password and message are Go templates:
 
 Rules can be edited in the form editor or as raw JSON (toggle in the editor). See [testdata/rules/motion-to-mock-camera.json](testdata/rules/motion-to-mock-camera.json) for an example.
 
-### Saved requests
+**Preview templates** (a tick box above the actions) renders every URL, header, body and message as you type, against a sample event for the rule's trigger. Saved actions show their parameters and the values they produce. Secrets appear as `‹secret NAME›`; their values are never sent to the browser. Broken templates show their error in place.
 
-The **Requests** tab holds reusable HTTP requests, so the same camera call doesn't have to be copied into every rule. Each one has a name, an HTTP request (method, URL, auth, headers, body, timeout), and optional **parameters**. Its templates use parameters as `{{ .params.NAME }}`, alongside the usual event data.
+**Edit conflicts.** If someone else saves a rule or saved action while you have it open, your save is refused instead of silently overwriting theirs. You can see what they changed, overwrite with your version, or load theirs. API clients opt in by sending the `updatedAt` they loaded; without it there's no check.
 
-Rules use one with the **+ Saved request** action. Pick the request, then fill in its parameters; values can use event data, e.g. `preset = {{ .data.deviceName }}-view`. A parameter with a default is optional, and one without a default is required. Editing a saved request updates every rule that uses it. A request can't be deleted while rules still use it. Each request has its own **Test** button, which asks for parameter values first.
+### Saved actions
 
-**Saved requests and secrets.** Parameters can change where a request goes, for example a `host` parameter in the URL. So:
+The **Saved actions** tab holds reusable actions, so the same camera call or Discord webhook doesn't have to be copied into every rule. Each one has a name, an action (an HTTP request, a delay, or a Discord message with all its options), and optional **parameters**. Its templates use parameters as `{{ .params.NAME }}`, alongside the usual event data. (In the API and in rule JSON they're still called requests: `/api/requests`, and `"type": "request"` with a `requestId`.)
 
-- A saved request that uses secrets runs with the secrets of the admin who last saved it, and **only that admin's rules can use it**. This is checked when a rule is saved and again on every run.
-- Saved requests without secrets can be used by anyone.
-- Parameter values can't use `{{ secret }}`. Put the secret in the saved request itself.
+Rules use one with the **+ Saved action** button. Pick the saved action, then fill in its parameters; values can use event data, e.g. `preset = {{ .data.deviceName }}-view`. A parameter with a default is optional, and one without a default is required. Editing a saved action updates every rule that uses it. A saved action can't be deleted while rules still use it. Each one has its own **Test** button, which asks for parameter values first.
+
+**Saved actions and secrets.** Parameters can change where an action goes, for example a `host` parameter in a URL. So:
+
+- A saved action that uses secrets runs with the secrets of the admin who last saved it, and **only that admin's rules can use it**. This is checked when a rule is saved and again on every run.
+- Saved actions without secrets can be used by anyone.
+- Parameter values can't use `{{ secret }}`. Put the secret in the saved action itself.
+
+### Schedules
+
+The **Schedules** tab holds named sets of days and hours, like *Weeknights: Mon–Fri 22:00–06:00* or *Business hours: Mon–Fri 08:00–17:00 and Sat 09:00–12:00*. A rule picks one under **Only run during**, and runs only for events that happened while one of its time windows was open (by the event's `eventOccurred`, or the time it arrived if that's missing or in the future, so a replayed event keeps its original hours); other events are logged as `offhours`. Editing a schedule updates every rule that uses it, and a schedule can't be deleted while rules use it.
+
+Windows add together: a schedule is open while any of its windows is, so overlapping windows are fine. The editor shows a **week at a glance** (all windows combined, with a marker at the current time), flags a window that other windows already cover completely (it adds nothing, so you can remove it), and refuses a window whose start and end are the same time (clear both for all day). Schedule cards show the same weekly view.
+
+Each schedule has a time zone, picked from a list (common US zones first). It defaults to Central time (`America/Chicago`). In each window, no days ticked means every day and no times means all day. A window that ends before it starts runs overnight and belongs to the day it starts on, so Friday 22:00–06:00 covers early Saturday. Cards show whether each schedule is open right now. API: `/api/schedules` (`{"name", "timezone", "windows": [{"days": ["mon"], "from": "22:00", "to": "06:00"}]}`).
+
+### History
+
+Every time a rule, saved action or schedule is created, edited or deleted, its content is saved to an edit log along with who made the change. Saves that change nothing aren't logged. The **History** tab lists every change, newest first. Each rule, saved action and schedule card also has a **History** button that shows just that item's changes. Open an entry to see a line-by-line diff against the previous version, or pick any other version to compare with. Rules and saved actions created before the log existed have their old state recorded the first time they change, so that first edit can still be compared. Passwords and `Authorization`, `Proxy-Authorization` and `X-Api-Key` header values typed straight into an action are shown as `‹hidden›` in the log, so a credential that's later moved into a secret, or deleted, doesn't stay readable there. `{{ secret "NAME" }}` references are kept, since they only name a secret. A change to a hidden value alone isn't logged. The log is kept forever; it isn't pruned with events. API: `GET /api/history?kind=rule|action|schedule&id=N&before=REVISION_ID`.
 
 ### Secrets
 
@@ -147,8 +188,9 @@ Each rule can accept an event and log it without acting on it:
 
 - **Ignore while running** (`"skipIfRunning": true`): if a run of this rule is still in progress, the event is logged as `busy` and nothing happens. Without this option, overlapping runs execute in parallel.
 - **Run at most once every N seconds** (`"cooldownSeconds": N`): events inside the window are logged as `cooldown`. The window can start when the last run **started** (`"cooldownFrom": "start"`, the default) or when it **finished** (`"cooldownFrom": "finish"`). With `finish`, events that arrive while a run is still going are ignored too, because the window hasn't opened yet.
+- **Only run during** a schedule (`"scheduleId": N`, see [Schedules](#schedules)): events while the schedule is closed are logged as `offhours`.
 
-The two options can be combined. Ignored events still appear in the Events tab with the reason. The rule's **Test** button skips both checks.
+The options can be combined. Ignored events still appear in the Events tab with the reason. The rule's **Test** button skips all of these checks.
 
 Duplicate deliveries (same `eventId`) are recorded once and never fire twice.
 
@@ -178,7 +220,16 @@ To run without Docker, use `task run` (dev auth on :8080). Use `task test` for t
 
 ## Demo
 
-The [live demo](https://coop25.github.io/yoursix-ifttt/) is the real UI from `internal/web/static`, with [`demo/mock-api.js`](demo/mock-api.js) standing in for the server: an in-browser imitation of the API, the rules engine (triggers, filters, cooldowns, ignore-while-running, saved requests) and the live event stream. It's published by the [Pages workflow](.github/workflows/pages.yml) whenever the UI or demo changes. Build it locally with `task demo` (output in `_site/`).
+The [live demo](https://coop25.github.io/yoursix-ifttt/) is the real UI from `internal/web/static`, with [`demo/mock-api.js`](demo/mock-api.js) standing in for the server: an in-browser imitation of the API, the rules engine (triggers, filters, cooldowns, ignore-while-running, schedules, saved actions, on-failure actions), history, search and the live event stream. It's published by the [Pages workflow](.github/workflows/pages.yml) whenever the UI or demo changes. Build it locally with `task demo` (output in `_site/`).
+
+**Keeping the demo in step.** The mock re-implements the server's behaviour in JavaScript, so a server change the UI can see usually needs a matching mock change, or the demo quietly drifts. When you change the API or the engine:
+
+- **New or changed endpoint:** add or update its route in the `routes` table in `mock-api.js`, with the same status codes and error shapes (`{"error": …}`, `409` with `conflict`/`current` for stale saves, `409` with `usedBy` for in-use deletes).
+- **New rule, action or schedule field:** handle it in `normalizeRule`/`validateRule` (or the saved-action and schedule validators), in `runActions`/`runStep` if it changes how runs behave, and in the `previewAction` mirror of template preview if it's templated.
+- **Anything that changes or deletes an item:** call `record(kind, item, change)` so the History tab sees it.
+- **New event field or search key:** update `termMatches` (search) and `eventView`.
+- **Logic the UI also needs** (like schedule time maths): put it in `internal/web/static/logic.js`, which both the UI and the mock load, and test it in `internal/web/jstest` (`task test:js`), rather than writing it twice.
+- **Then check it:** `task demo`, open `_site/index.html` (or serve it), and try the feature. `task screenshots` exercises every tab too.
 
 ## Production
 

@@ -23,6 +23,12 @@ tasks:
     desc: Run unit tests
     cmds:
       - go test -race ./...
+      - task: test:js
+
+  test:js:
+    desc: Run the browser-side logic tests (Node, or a headless Chrome/Edge)
+    cmds:
+      - sh internal/web/jstest/run.sh
 
   lint:
     desc: go vet + gofmt check
@@ -79,6 +85,11 @@ tasks:
       - "{{.TEST_COMPOSE}} down -v"
 
   # ---------- GitHub Pages demo ----------
+  screenshots:
+    desc: Retake the README screenshots (docs/screenshots) from the demo build; needs Chrome, Chromium or Edge
+    cmds:
+      - sh demo/screenshots.sh
+
   demo:
     desc: Build the browser-only demo (real UI + in-browser fake backend) into _site/
     cmds:

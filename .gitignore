@@ -7,3 +7,4 @@ data-dev/
 *.db-*
 .task/
 _site/
+_shots/

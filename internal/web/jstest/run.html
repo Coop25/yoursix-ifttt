@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>logic.js tests</title>
+<!-- Runs logic.test.js in a browser; run.sh reads the result from the DOM. -->
+<script>
+  "use strict";
+  const results = [];
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const fail = (msg, a, b) => { throw new Error(`${msg ? msg + ": " : ""}got ${JSON.stringify(a)}, want ${JSON.stringify(b)}`); };
+  window.assert = {
+    equal: (a, b, msg) => { if (a !== b) fail(msg, a, b); },
+    deepEqual: (a, b, msg) => { if (!same(a, b)) fail(msg, a, b); },
+    ok: (v, msg) => { if (!v) fail(msg, v, true); },
+  };
+  window.test = (name, fn) => {
+    try {
+      fn();
+      results.push(`ok - ${name}`);
+    } catch (e) {
+      results.push(`FAIL - ${name}: ${e.message}`);
+    }
+  };
+  window.addEventListener("load", () => {
+    const failed = results.filter((r) => r.startsWith("FAIL")).length;
+    document.body.id = "results";
+    document.body.textContent = [...results, `# ${results.length - failed}/${results.length} passed`].join("\n");
+  });
+</script>
+<script src="../static/logic.js"></script>
+<script src="logic.test.js"></script>

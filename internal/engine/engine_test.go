@@ -208,3 +208,146 @@ func TestRuleSettingsPersist(t *testing.T) {
 		t.Fatalf("not persisted: %+v", got.Rule)
 	}
 }
+
+func TestOffHours(t *testing.T) {
+	h := newHarness(t)
+	now := time.Now().UTC()
+	// A one-minute window that's never now: it starts two hours from now.
+	from := now.Add(2 * time.Hour).Format("15:04")
+	to := now.Add(2*time.Hour + time.Minute).Format("15:04")
+	sc, err := h.st.CreateSchedule(context.Background(), rules.Schedule{Name: "later", Timezone: "UTC", Windows: []rules.Window{{From: from, To: to}}}, store.Editor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.rule(rules.Rule{ScheduleID: sc.ID})
+	if got := h.fire(); got != store.RunOffHours {
+		t.Fatalf("status = %s, want offhours", got)
+	}
+	if h.hits.Load() != 0 {
+		t.Fatal("off-hours rule called its target")
+	}
+}
+
+func TestOnFailureActions(t *testing.T) {
+	var got atomic.Value
+	alert := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.URL.Query().Get("msg"))
+	}))
+	defer alert.Close()
+
+	h := newHarness(t)
+	r := rules.Rule{Name: "fails", Enabled: true, Trigger: rules.Trigger{Codes: []string{"vmd"}},
+		Actions: []rules.Action{{Type: rules.ActionHTTP, Name: "Broken cam", URL: "http://127.0.0.1:1/x", TimeoutSeconds: 2}},
+		OnFailure: []rules.Action{{Type: rules.ActionHTTP, Name: "Alert",
+			URL: alert.URL + "/?msg={{ urlquery .failure.step }}+{{ .failure.stepNumber }}+{{ .rule }}"}},
+	}
+	created, err := h.st.CreateRule(context.Background(), r, store.Editor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := yoursix.Sample("device", "vmd")
+	raw, _ := json.Marshal(ev)
+	res, err := h.eng.Dispatch(context.Background(), ev, raw, "test", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.waitIdle(created.ID)
+	e, err := h.st.GetEvent(context.Background(), res.EventRow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := e.Runs[0]
+	if run.Status != store.RunFailed || len(run.Steps) != 2 || !run.Steps[1].OnFailure || !run.Steps[1].OK || run.Steps[1].Index != 1 {
+		t.Fatalf("run: %+v", run)
+	}
+	if msg, _ := got.Load().(string); msg != "Broken cam 1 fails" {
+		t.Fatalf("alert got %q", msg)
+	}
+}
+
+// Schedules judge an event by when it happened, so a replayed or late
+// event follows the hours it belongs to. A future time counts as now.
+func TestOffHoursUsesEventTime(t *testing.T) {
+	h := newHarness(t)
+	now := time.Now().UTC()
+	// Open from a minute ago to two minutes from now.
+	from, to := now.Add(-time.Minute).Format("15:04"), now.Add(2*time.Minute).Format("15:04")
+	sc, err := h.st.CreateSchedule(context.Background(), rules.Schedule{Name: "now", Timezone: "UTC", Windows: []rules.Window{{From: from, To: to}}}, store.Editor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.rule(rules.Rule{ScheduleID: sc.ID})
+	fireAt := func(at time.Time) string {
+		ev := yoursix.Sample("device", "vmd")
+		ev.EventOccurred = at.Format(time.RFC3339)
+		raw, _ := json.Marshal(ev)
+		res, err := h.eng.Dispatch(context.Background(), ev, raw, "test", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := h.st.GetEvent(context.Background(), res.EventRow)
+		if err != nil || len(got.Runs) != 1 {
+			t.Fatalf("runs: %+v %v", got.Runs, err)
+		}
+		return got.Runs[0].Status
+	}
+	if got := fireAt(now.Add(-12 * time.Hour)); got != store.RunOffHours {
+		t.Fatalf("event from 12 hours ago: %s, want offhours", got)
+	}
+	if got := fireAt(now.Add(12 * time.Hour)); got == store.RunOffHours {
+		t.Fatal("future event time should count as now")
+	}
+}
+
+func TestEventTime(t *testing.T) {
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour)
+	for occurred, want := range map[string]time.Time{
+		past.Format(time.RFC3339Nano): past,
+		"":                            now,
+		"yesterday":                   now,
+		now.Add(time.Hour).Format(time.RFC3339Nano): now,
+	} {
+		if got := eventTime(yoursix.Event{EventOccurred: occurred}, now); !got.Equal(want) {
+			t.Errorf("%q: %v, want %v", occurred, got, want)
+		}
+	}
+}
+
+// A failure the rule chose to ignore (continue on error) doesn't trigger
+// on-failure actions, though the run is still marked failed.
+func TestOnFailureSkipsIgnoredFailures(t *testing.T) {
+	var alerts atomic.Int32
+	alert := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { alerts.Add(1) }))
+	defer alert.Close()
+
+	h := newHarness(t)
+	r := rules.Rule{Name: "ignores", Enabled: true, Trigger: rules.Trigger{Codes: []string{"vmd"}},
+		Actions: []rules.Action{
+			{Type: rules.ActionHTTP, Name: "Optional", URL: "http://127.0.0.1:1/x", TimeoutSeconds: 2, ContinueOnError: true},
+			{Type: rules.ActionDelay, DelayMillis: 1},
+		},
+		OnFailure: []rules.Action{{Type: rules.ActionHTTP, Name: "Alert", URL: alert.URL}},
+	}
+	created, err := h.st.CreateRule(context.Background(), r, store.Editor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := yoursix.Sample("device", "vmd")
+	raw, _ := json.Marshal(ev)
+	res, err := h.eng.Dispatch(context.Background(), ev, raw, "test", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.waitIdle(created.ID)
+	e, err := h.st.GetEvent(context.Background(), res.EventRow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run := e.Runs[0]; run.Status != store.RunFailed || len(run.Steps) != 2 {
+		t.Fatalf("run: %+v", run)
+	}
+	if n := alerts.Load(); n != 0 {
+		t.Fatalf("on-failure ran %d time(s) for an ignored failure", n)
+	}
+}

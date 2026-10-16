@@ -4,6 +4,7 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -103,7 +104,13 @@ func (e *Engine) Dispatch(ctx context.Context, ev yoursix.Event, raw []byte, sou
 			continue
 		}
 		res.Matched = append(res.Matched, r.ID)
-		if skip := e.claim(r); skip != "" {
+		skip := ""
+		if !e.inHours(ctx, r, eventTime(ev, time.Now())) {
+			skip = store.RunOffHours
+		} else {
+			skip = e.claim(r)
+		}
+		if skip != "" {
 			if _, err := e.store.StartRun(ctx, row, r, skip); err != nil {
 				e.log.Error("record skipped run", "rule", r.Name, "err", err)
 			}
@@ -136,13 +143,7 @@ func (e *Engine) StartTestRun(ctx context.Context, r rules.Rule, ev yoursix.Even
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
-		steps, ok := e.runner.RunWith(e.ctx, r.Actions, ev.TemplateData(r.Name), actions.RunOptions{
-			Secrets:     e.secrets.LookupFor(e.ctx, r.UpdatedBy),
-			Owner:       r.UpdatedBy,
-			OnStep:      e.progress(row, runID),
-			OnStepStart: e.stepStarted(row, runID),
-		})
-		e.finish(row, runID, r, ev, steps, ok)
+		e.execute(row, runID, r, ev)
 	}()
 	return store.RunView{ID: runID, EventRow: row, RuleID: r.ID, RuleName: r.Name, Status: store.RunRunning, Steps: []actions.StepResult{}}, nil
 }
@@ -171,7 +172,7 @@ func (e *Engine) stepLabel(a rules.Action) string {
 		if sr, err := e.store.SavedRequest(context.Background(), a.RequestID); err == nil {
 			return sr.Name
 		}
-		return "Saved request"
+		return "Saved action"
 	case rules.ActionDelay:
 		return "Delay"
 	case rules.ActionDiscord:
@@ -279,15 +280,63 @@ func (e *Engine) startRun(row int64, r rules.Rule, ev yoursix.Event) {
 			return
 		}
 		defer func() { <-e.sem }()
-
-		steps, ok := e.runner.RunWith(e.ctx, r.Actions, ev.TemplateData(r.Name), actions.RunOptions{
-			Secrets:     e.secrets.LookupFor(e.ctx, r.UpdatedBy),
-			Owner:       r.UpdatedBy,
-			OnStep:      e.progress(row, runID),
-			OnStepStart: e.stepStarted(row, runID),
-		})
-		e.finish(row, runID, r, ev, steps, ok)
+		e.execute(row, runID, r, ev)
 	}()
+}
+
+// execute runs a rule's actions, then its on-failure actions if a step
+// failed that wasn't set to continue on error, recording progress as it
+// goes. On-failure steps are appended to the run's steps, marked
+// OnFailure; the run still counts as failed.
+func (e *Engine) execute(row, runID int64, r rules.Rule, ev yoursix.Event) {
+	data := ev.TemplateData(r.Name)
+	opts := actions.RunOptions{
+		Secrets:     e.secrets.LookupFor(e.ctx, r.UpdatedBy),
+		Owner:       r.UpdatedBy,
+		OnStep:      e.progress(row, runID),
+		OnStepStart: e.stepStarted(row, runID),
+	}
+	steps, ok := e.runner.RunWith(e.ctx, r.Actions, data, opts)
+	failure, failed := FailureData(steps, r.Actions)
+	if !ok && failed && len(r.OnFailure) > 0 && e.ctx.Err() == nil {
+		data["failure"] = failure
+		main := steps
+		mark := func(extra []actions.StepResult) []actions.StepResult {
+			out := append(slices.Clip(main), extra...)
+			for i := len(main); i < len(out); i++ {
+				out[i].Index += len(main)
+				out[i].OnFailure = true
+			}
+			return out
+		}
+		save, started := opts.OnStep, opts.OnStepStart
+		opts.OnStep = func(s []actions.StepResult) { save(mark(s)) }
+		opts.OnStepStart = func(i int, a rules.Action, until time.Time) { started(i+len(main), a, until) }
+		extra, _ := e.runner.RunWith(e.ctx, r.OnFailure, data, opts)
+		steps = mark(extra)
+	}
+	e.finish(row, runID, r, ev, steps, ok)
+}
+
+// FailureData is what on-failure actions see as .failure: the name, 1-based
+// number and error of the step that stopped the run. Failures of steps set
+// to continue on error were chosen to be ignored, so they don't count;
+// failed is false when there's no other failure.
+func FailureData(steps []actions.StepResult, acts []rules.Action) (failure map[string]any, failed bool) {
+	for _, s := range steps {
+		if s.OK || s.Skipped || s.Error == "" {
+			continue
+		}
+		if s.Index < len(acts) && acts[s.Index].ContinueOnError {
+			continue
+		}
+		name := s.Name
+		if name == "" {
+			name = s.Type
+		}
+		return map[string]any{"step": name, "stepNumber": s.Index + 1, "error": s.Error}, true
+	}
+	return nil, false
 }
 
 func (e *Engine) changed(row int64) {
@@ -319,4 +368,50 @@ func (e *Engine) Forget(ruleID int64) {
 	delete(e.lastFired, ruleID)
 	delete(e.lastFinished, ruleID)
 	e.mu.Unlock()
+}
+
+// Preview renders every templated value of r's actions (and on-failure
+// actions) against ev, without running anything. Secrets show as
+// placeholders. On-failure actions see a sample .failure for step 1.
+func (e *Engine) Preview(ctx context.Context, r rules.Rule, ev yoursix.Event) (acts, onFailure [][]actions.PreviewField) {
+	data := ev.TemplateData(r.Name)
+	for _, a := range r.Actions {
+		acts = append(acts, e.runner.Preview(ctx, a, data))
+	}
+	if len(r.OnFailure) > 0 {
+		first := "Action 1"
+		if len(r.Actions) > 0 && r.Actions[0].Name != "" {
+			first = r.Actions[0].Name
+		}
+		data["failure"] = map[string]any{"step": first, "stepNumber": 1, "error": "sample error: connection refused"}
+		for _, a := range r.OnFailure {
+			onFailure = append(onFailure, e.runner.Preview(ctx, a, data))
+		}
+	}
+	return acts, onFailure
+}
+
+// eventTime is when ev happened, for schedule checks: its eventOccurred,
+// so a replayed or late event is judged by the hours it belongs to. A
+// missing, unreadable or future time (clock skew) counts as now.
+func eventTime(ev yoursix.Event, now time.Time) time.Time {
+	if t := ev.OccurredAt(); !t.IsZero() && !t.After(now) {
+		return t
+	}
+	return now
+}
+
+// inHours reports whether r may run for an event at t under its schedule,
+// if it has one. A schedule that can't be read (it can't be deleted while
+// in use, so this means a database problem) doesn't block the rule.
+func (e *Engine) inHours(ctx context.Context, r rules.Rule, t time.Time) bool {
+	if r.ScheduleID == 0 {
+		return true
+	}
+	sc, err := e.store.Schedule(ctx, r.ScheduleID)
+	if err != nil {
+		e.log.Error("load schedule", "rule", r.Name, "schedule", r.ScheduleID, "err", err)
+		return true
+	}
+	return sc.Active(t)
 }

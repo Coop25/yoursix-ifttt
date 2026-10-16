@@ -6,6 +6,7 @@
   <title>YourSix IFTTT</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="app.css">
+  <script src="logic.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -13,8 +14,10 @@
     <div class="brand">YourSix <span>IFTTT</span></div>
     <nav id="tabs" class="tabs hidden">
       <button data-tab="rules" class="active">Rules</button>
-      <button data-tab="requests">Requests</button>
+      <button data-tab="requests">Saved actions</button>
+      <button data-tab="schedules">Schedules</button>
       <button data-tab="events">Events</button>
+      <button data-tab="history">History</button>
       <button data-tab="secrets" class="admin-only">Secrets</button>
       <button data-tab="setup">Setup</button>
     </nav>
@@ -39,11 +42,20 @@
 
     <section id="view-requests" class="view hidden">
       <div class="toolbar">
-        <h2>Saved requests</h2>
-        <button id="new-request" class="btn primary admin-only">New request</button>
+        <h2>Saved actions</h2>
+        <button id="new-request" class="btn primary admin-only">New saved action</button>
       </div>
-      <p class="muted">Define an HTTP request once and use it from any rule with the <strong>+ Saved request</strong> action. Editing it here updates every rule that uses it. Parameters (<code>{{ .params.NAME }}</code>) let each rule fill in its own values, such as a preset name.</p>
+      <p class="muted">Set up an HTTP request, delay or Discord message once and use it from any rule with <strong>+ Saved action</strong>. Editing it here updates every rule that uses it. Parameters (<code>{{ .params.NAME }}</code>) let each rule fill in its own values, such as a preset name.</p>
       <div id="requests-list" class="cards"></div>
+    </section>
+
+    <section id="view-schedules" class="view hidden">
+      <div class="toolbar">
+        <h2>Schedules</h2>
+        <button id="new-schedule" class="btn primary admin-only">New schedule</button>
+      </div>
+      <p class="muted">Days and hours a rule may run, like "Weeknights 22:00–06:00". Pick one in a rule under <strong>Only run during</strong>; events outside it are logged as <em>off hours</em> and ignored. Editing a schedule updates every rule that uses it.</p>
+      <div id="schedules-list" class="cards"></div>
     </section>
 
     <section id="view-events" class="view hidden">
@@ -52,11 +64,49 @@
         <span id="events-live" class="live-pill" data-status="connecting" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span class="label">Connecting…</span></span>
         <button id="events-refresh" class="btn">Refresh</button>
       </div>
+      <form id="events-search" class="search-row" role="search" autocomplete="off">
+        <input type="search" id="events-q" placeholder="Search, e.g. device:CAM-01 site:HQ rule:gate" aria-label="Search events" enterkeyhint="search">
+        <select id="events-outcome" aria-label="Outcome">
+          <option value="">Any outcome</option>
+          <option value="matched">Ran a rule</option>
+          <option value="ok">Rule succeeded</option>
+          <option value="failed">Rule failed</option>
+          <option value="skipped">Skipped (cooldown, busy or off hours)</option>
+          <option value="nomatch">No rule matched</option>
+          <option value="test">Tests and simulations</option>
+        </select>
+        <label class="inline date-pick">From <input type="date" id="events-from"></label>
+        <label class="inline date-pick">to <input type="date" id="events-to"></label>
+      </form>
+      <details class="help search-tips">
+        <summary>Search tips</summary>
+        <ul>
+          <li>Words match anywhere: code, description, source IP, payload or rule name. Every word must match. Use <code>"quotes"</code> for a phrase.</li>
+          <li><code>device:CAM-01</code>, <code>site:"Head office"</code>, <code>group:west</code>, <code>peripheral:door</code> match one eventData field. Any other eventData key works too, e.g. <code>videoSourceId:0</code>.</li>
+          <li><code>topic:device</code>, <code>code:vmd</code>, <code>rule:gate</code>, <code>ip:10.0.</code>, <code>status:failed</code> (ok, failed, cooldown, busy, offhours, running).</li>
+        </ul>
+      </details>
       <table class="events">
         <thead><tr><th>Received</th><th>Event</th><th>Source</th><th>Rules</th><th><span class="visually-hidden">Video</span></th></tr></thead>
         <tbody id="events-body"></tbody>
       </table>
       <button id="events-more" class="btn hidden">Load older</button>
+    </section>
+
+    <section id="view-history" class="view hidden">
+      <div class="toolbar">
+        <h2>History</h2>
+        <select id="history-kind" aria-label="Show changes to">
+          <option value="">Everything</option>
+          <option value="rule">Rules</option>
+          <option value="action">Saved actions</option>
+          <option value="schedule">Schedules</option>
+        </select>
+      </div>
+      <p class="muted">Every create, edit and delete, with who made it. Open an entry to see what changed, or compare it with any other version of the same item.</p>
+      <div id="history-scope" class="hidden"></div>
+      <div id="history-list" class="history"></div>
+      <button id="history-more" class="btn hidden">Load older</button>
     </section>
 
     <section id="view-secrets" class="view hidden">
@@ -122,23 +172,40 @@
           </select>
           <span class="muted small">(0 = no limit)</span>
         </div>
+        <div class="row">
+          <label class="inline">Only run during <select id="f-schedule" aria-label="Schedule"></select></label>
+          <span id="f-schedule-info" class="muted small"></span>
+        </div>
 
         <h3>If… <span class="muted small">(empty = any)</span></h3>
-        <div class="field-label">Topics</div>
-        <div id="f-topics" class="chips"></div>
-        <div class="field-label">Event codes</div>
-        <div id="f-codes" class="chips scroll"></div>
+        <div class="grid2 even">
+          <div><div class="field-label">Topics</div><div id="f-topics" class="picker"></div></div>
+          <div><div class="field-label">Event codes</div><div id="f-codes" class="picker"></div></div>
+        </div>
         <div class="field-label">Filters <span class="muted small">(all must match; fields are eventData keys like deviceName, or eventCode etc.)</span></div>
         <div id="f-filters"></div>
         <button type="button" class="btn small" id="add-filter">+ Filter</button>
 
-        <h3>Then…</h3>
+        <div class="then-head">
+          <h3>Then…</h3>
+          <label class="inline small"><input type="checkbox" id="f-preview-on"> Preview templates</label>
+        </div>
+        <p id="preview-note" class="muted small hidden"></p>
         <div id="f-actions"></div>
         <div class="row">
           <button type="button" class="btn small" data-add-action="http">+ HTTP request</button>
           <button type="button" class="btn small" data-add-action="delay">+ Delay</button>
           <button type="button" class="btn small" data-add-action="discord">+ Discord message</button>
-          <button type="button" class="btn small" data-add-action="request">+ Saved request</button>
+          <button type="button" class="btn small" data-add-action="request">+ Saved action</button>
+        </div>
+
+        <h3>If anything fails… <span class="muted small">(optional)</span></h3>
+        <p class="muted small">Runs after a step fails, e.g. to post an alert. Templates here also see <code>{{ .failure.step }}</code>, <code>{{ .failure.stepNumber }}</code> and <code>{{ .failure.error }}</code>.</p>
+        <div id="f-onfail"></div>
+        <div class="row">
+          <button type="button" class="btn small" data-add-fail="discord">+ Discord message</button>
+          <button type="button" class="btn small" data-add-fail="http">+ HTTP request</button>
+          <button type="button" class="btn small" data-add-fail="request">+ Saved action</button>
         </div>
         <details class="help">
           <summary>Template help</summary>
@@ -148,7 +215,7 @@
             <li><code>{{ .event.eventCode }}</code>, <code>{{ .event.eventTopic }}</code>, <code>{{ .event.key }}</code>, <code>{{ .rule }}</code></li>
             <li><code>{{ json .data.deviceName }}</code> – JSON-quoted value for JSON bodies</li>
             <li><code>{{ urlquery .data.deviceName }}</code> – URL-escaped value</li>
-            <li><code>{{ .params.preset }}</code> – inside a saved request: a value the rule fills in</li>
+            <li><code>{{ .params.preset }}</code> – inside a saved action: a value the rule fills in</li>
             <li><code>{{ secret "FRONT_CAM_PASS" }}</code> – one of <em>your</em> secrets (Secrets tab), or an operator env secret <code>Y6IFTTT_SECRET_FRONT_CAM_PASS</code>. The name must be a quoted literal.</li>
           </ul>
         </details>
@@ -166,7 +233,7 @@
 
   <dialog id="req-editor">
     <form method="dialog" id="req-form">
-      <header class="dlg-head"><h2 id="req-title">Saved request</h2></header>
+      <header class="dlg-head"><h2 id="req-title">Saved action</h2></header>
       <div class="grid2">
         <label>Name <input id="r-name" required maxlength="120" placeholder="e.g. Front cam: go to PTZ preset"></label>
         <label>Description <input id="r-desc" maxlength="300" placeholder="optional"></label>
@@ -176,20 +243,50 @@
       <div id="r-params"></div>
       <button type="button" class="btn small" id="r-add-param">+ Parameter</button>
 
-      <h3>Request</h3>
+      <h3>Action</h3>
+      <label class="type-pick">What it does
+        <select id="r-type">
+          <option value="http">HTTP request</option>
+          <option value="delay">Delay</option>
+          <option value="discord">Discord message</option>
+        </select>
+      </label>
       <div id="r-request"></div>
       <details class="help">
         <summary>Template help</summary>
-        <p>URL, body, header values and password are Go templates. They see the triggering event and the parameters:</p>
+        <p>URLs, bodies, header values, passwords and messages are Go templates. They see the triggering event and the parameters:</p>
         <ul>
           <li><code>{{ .params.preset }}</code>, <code>{{ urlquery .params.preset }}</code> – a parameter value</li>
           <li><code>{{ .data.deviceName }}</code>, <code>{{ .event.eventCode }}</code> – event data, as in rules</li>
-          <li><code>{{ secret "CAMERA_PASS" }}</code> – one of your secrets. A request that uses secrets can only be used by your own rules, because parameters could otherwise redirect it.</li>
+          <li><code>{{ secret "CAMERA_PASS" }}</code> – one of your secrets. A saved action that uses secrets can only be used by your own rules, because parameters could otherwise redirect it.</li>
         </ul>
       </details>
       <p id="req-error" class="error"></p>
       <footer class="dlg-foot">
         <button type="button" class="btn" id="req-cancel">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="sched-editor">
+    <form method="dialog" id="sched-form">
+      <header class="dlg-head"><h2 id="sched-title">Schedule</h2></header>
+      <div class="grid2">
+        <label>Name <input id="s-name" required maxlength="120" placeholder="e.g. Weeknights"></label>
+        <label>Time zone <select id="s-tz"></select></label>
+      </div>
+      <label>Description <input id="s-desc" maxlength="300" placeholder="optional"></label>
+      <h3>Time windows <span class="muted small">(a rule runs while any window is open)</span></h3>
+      <p class="muted small">No days ticked means every day; no times means all day. A window that ends earlier than it starts (22:00 to 06:00) runs overnight and counts toward the day it starts on.</p>
+      <div id="s-windows"></div>
+      <button type="button" class="btn small" id="s-add-window">+ Time window</button>
+      <h3>Week at a glance <span class="muted small">(all windows combined)</span></h3>
+      <div id="s-timeline"></div>
+      <p id="sched-now" class="muted small"></p>
+      <p id="sched-error" class="error"></p>
+      <footer class="dlg-foot">
+        <button type="button" class="btn" id="sched-cancel">Cancel</button>
         <button type="submit" class="btn primary">Save</button>
       </footer>
     </form>

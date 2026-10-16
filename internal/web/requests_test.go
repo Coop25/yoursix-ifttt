@@ -95,6 +95,45 @@ func TestSavedRequestRunsWithParams(t *testing.T) {
 	}
 }
 
+func TestSavedDelayAndDiscordActions(t *testing.T) {
+	ta := newTwoAdmins(t)
+	delayID := ta.create(t, ta.alice, "/api/requests", map[string]any{
+		"name": "Settle", "request": map[string]any{"type": "delay", "delayMillis": 5},
+	})
+	discordID := ta.create(t, ta.alice, "/api/requests", map[string]any{
+		"name":    "Alert channel",
+		"params":  []map[string]string{{"name": "who", "default": "everyone"}},
+		"request": map[string]any{"type": "discord", "webhookUrl": ta.target.URL + "/hook?to={{ urlquery .params.who }}", "message": "{{ .data.deviceName }}"},
+	})
+	rule := map[string]any{
+		"name": "saved steps", "enabled": true,
+		"trigger": map[string]any{"codes": []string{"vmd"}},
+		"actions": []map[string]any{
+			{"type": "request", "requestId": delayID},
+			{"type": "request", "requestId": discordID, "params": map[string]string{"who": "ops"}},
+		},
+	}
+	ruleID := ta.create(t, ta.alice, "/api/rules", rule)
+	run := ta.runTest(t, ta.alice, fmt.Sprintf("/api/rules/%d/test", ruleID), map[string]any{})
+	if !strings.Contains(run, `"status":"ok"`) || !strings.Contains(run, `"name":"Settle"`) || !strings.Contains(run, `"name":"Alert channel"`) {
+		t.Fatalf("run: %s", run)
+	}
+	ta.mu.Lock()
+	q := ta.gotQueries[len(ta.gotQueries)-1]
+	ta.mu.Unlock()
+	if q != "to=ops" {
+		t.Fatalf("discord hook got query %q", q)
+	}
+
+	// A saved action can't wrap another saved action.
+	code, body := ta.do(t, ta.alice, "POST", "/api/requests", map[string]any{
+		"name": "nested", "request": map[string]any{"type": "request", "requestId": delayID},
+	})
+	if code != 400 || !strings.Contains(body, "can't be of type") {
+		t.Fatalf("nested: %d %s", code, body)
+	}
+}
+
 func TestSavedRequestParamValidation(t *testing.T) {
 	ta := newTwoAdmins(t)
 	reqID := ta.create(t, ta.alice, "/api/requests", ta.savedRequest(false))

@@ -10,15 +10,17 @@ import (
 
 var validParam = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 
-// SavedRequest is a reusable HTTP request that rules run through an
-// ActionRequest. Its URL, headers, body and password are templates that see
-// the event (.data, .event) plus .params, the values a rule supplies.
+// SavedRequest is a reusable "saved action" (an HTTP request, delay or
+// Discord message) that rules run through an ActionRequest. Its templated
+// strings see the event (.data, .event) plus .params, the values a rule
+// supplies.
 type SavedRequest struct {
 	ID          int64   `json:"id"`
 	Name        string  `json:"name"`
 	Description string  `json:"description,omitempty"`
 	Params      []Param `json:"params"`
-	// Request is an ActionHTTP.
+	// Request is the action it runs: an ActionHTTP, ActionDelay or
+	// ActionDiscord, never another ActionRequest.
 	Request Action `json:"request"`
 	// UpdatedBy is the admin who last saved it. A request that uses secrets
 	// runs with that admin's secrets, so only that admin's rules may use it.
@@ -48,9 +50,13 @@ func (s *SavedRequest) Validate() error {
 	if s.Request.Type == "" {
 		s.Request.Type = ActionHTTP
 	}
-	if s.Request.Type != ActionHTTP {
-		return errors.New("a saved request must be an HTTP request")
+	switch s.Request.Type {
+	case ActionHTTP, ActionDelay, ActionDiscord:
+	default:
+		return fmt.Errorf("a saved action can't be of type %q", s.Request.Type)
 	}
+	// The rule using it supplies the label and error handling.
+	s.Request.Name, s.Request.ContinueOnError = "", false
 	if err := s.Request.validate(); err != nil {
 		return err
 	}
@@ -84,7 +90,7 @@ func (s SavedRequest) ResolveParams(given map[string]string) (map[string]string,
 	}
 	for k, v := range given {
 		if !declared[k] {
-			return nil, fmt.Errorf("saved request %q has no parameter %q", s.Name, k)
+			return nil, fmt.Errorf("saved action %q has no parameter %q", s.Name, k)
 		}
 		if v != "" {
 			out[k] = v
@@ -92,7 +98,7 @@ func (s SavedRequest) ResolveParams(given map[string]string) (map[string]string,
 	}
 	for _, p := range s.Params {
 		if out[p.Name] == "" && p.Required() {
-			return nil, fmt.Errorf("saved request %q needs a value for %q", s.Name, p.Name)
+			return nil, fmt.Errorf("saved action %q needs a value for %q", s.Name, p.Name)
 		}
 	}
 	return out, nil
