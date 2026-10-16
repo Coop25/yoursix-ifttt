@@ -38,6 +38,9 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      - name: JS tests
+        run: node internal/web/jstest/run-node.mjs
+
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
