@@ -175,18 +175,10 @@ func (s *Store) UpdateSchedule(ctx context.Context, sc rules.Schedule, by Editor
 		if err := checkFresh(KindSchedule, sc.UpdatedAt, before.UpdatedAt, before.UpdatedByName, before); err != nil {
 			return err
 		}
-		was, err := stamp(ctx, q, "schedules", sc.ID)
-		if err != nil {
+		if _, err := q.ExecContext(ctx,
+			`UPDATE schedules SET name=?, description=?, windows_json=?, timezone=?, updated_by=?, updated_by_name=?, updated_at=? WHERE id=?`,
+			sc.Name, sc.Description, string(windows), sc.Timezone, by.ID, by.Name, now(), sc.ID); err != nil {
 			return err
-		}
-		res, err := q.ExecContext(ctx,
-			`UPDATE schedules SET name=?, description=?, windows_json=?, timezone=?, updated_by=?, updated_by_name=?, updated_at=? WHERE id=? AND updated_at=?`,
-			sc.Name, sc.Description, string(windows), sc.Timezone, by.ID, by.Name, now(), sc.ID, was)
-		if err != nil {
-			return err
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return ConflictError{Kind: KindSchedule, Current: before, By: before.UpdatedByName, At: before.UpdatedAt}
 		}
 		updated, err := getSchedule(ctx, q, sc.ID)
 		if err != nil {

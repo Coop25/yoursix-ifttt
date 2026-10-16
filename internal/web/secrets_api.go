@@ -23,10 +23,6 @@ func (s *Server) ruleEditor(w http.ResponseWriter, r *http.Request, rule rules.R
 		writeError(w, http.StatusBadRequest, err.Error())
 		return store.Editor{}, false
 	}
-	if err := s.checkSchedule(r, rule); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return store.Editor{}, false
-	}
 	return editorFor(u), true
 }
 

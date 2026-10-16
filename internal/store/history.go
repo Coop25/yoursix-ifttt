@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -57,7 +59,48 @@ func snapshot(v any) ([]byte, error) {
 	for _, k := range volatile {
 		delete(m, k)
 	}
+	redact(m)
 	return json.Marshal(m)
+}
+
+// Hidden replaces credentials typed straight into an action (not through
+// {{ secret }}) in history snapshots. Anyone who can view the log can read
+// them, and they'd outlive the edit or delete that removed them.
+const Hidden = "‹hidden›"
+
+// credentialHeaders are header names whose literal values are hidden.
+var credentialHeaders = []string{"authorization", "proxy-authorization", "x-api-key"}
+
+// redact hides literal passwords and credential headers anywhere in v.
+// Templated values ({{ secret "X" }}) only name a secret, so they're kept.
+func redact(v any) {
+	literal := func(s any) bool {
+		str, ok := s.(string)
+		return ok && str != "" && !strings.Contains(str, "{{")
+	}
+	switch v := v.(type) {
+	case map[string]any:
+		for k, val := range v {
+			switch {
+			case k == "password" && literal(val):
+				v[k] = Hidden
+			case k == "headers":
+				if hs, ok := val.(map[string]any); ok {
+					for name, hv := range hs {
+						if slices.Contains(credentialHeaders, strings.ToLower(name)) && literal(hv) {
+							hs[name] = Hidden
+						}
+					}
+				}
+			default:
+				redact(val)
+			}
+		}
+	case []any:
+		for _, e := range v {
+			redact(e)
+		}
+	}
 }
 
 // record adds a revision for an item, in the caller's transaction. Updates that change nothing (compared

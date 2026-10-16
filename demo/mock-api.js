@@ -142,9 +142,24 @@
     if (v && typeof v === "object") return Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys(v[k])]));
     return v;
   }
+  // Credentials typed into an action (not {{ secret }}) are hidden, like
+  // store.redact.
+  const CREDENTIAL_HEADERS = ["authorization", "proxy-authorization", "x-api-key"];
+  const literal = (s) => typeof s === "string" && s !== "" && !s.includes("{{");
+  function redact(v) {
+    if (Array.isArray(v)) return v.forEach(redact);
+    if (!v || typeof v !== "object") return;
+    for (const [k, val] of Object.entries(v)) {
+      if (k === "password" && literal(val)) v[k] = "‹hidden›";
+      else if (k === "headers" && val && typeof val === "object") {
+        for (const [name, hv] of Object.entries(val)) if (CREDENTIAL_HEADERS.includes(name.toLowerCase()) && literal(hv)) val[name] = "‹hidden›";
+      } else redact(val);
+    }
+  }
   function snapshot(item) {
     const o = clone(item);
     VOLATILE.forEach((k) => delete o[k]);
+    redact(o);
     return sortKeys(o);
   }
   function record(kind, item, change, by = ME, at = iso()) {
@@ -575,10 +590,10 @@
   }
 
   // Event search, like internal/store: free words and "phrases" match
-  // anywhere; key:value matches one field.
+  // anywhere; key:value matches one field. "http://…" is free text.
   function parseSearch(s) {
     const out = [];
-    const re = /(?:([A-Za-z_]\w*):(?=\S))?(?:"([^"]*)"?|(\S+))/g;
+    const re = /(?:([A-Za-z_]\w*):(?=[^\s/]))?(?:"([^"]*)"?|(\S+))/g;
     for (const m of s.matchAll(re)) {
       const value = (m[2] ?? m[3] ?? "").trim();
       if (value) out.push({ key: m[1] || "", value: value.toLowerCase() });

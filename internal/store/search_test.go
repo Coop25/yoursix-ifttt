@@ -14,7 +14,7 @@ func TestParseSearch(t *testing.T) {
 	got := parseSearch(` cam-01  site:"Head office" rule:gate "front door" groupName:west http://x weird: `)
 	want := []searchTerm{
 		{"", "cam-01"}, {"site", "Head office"}, {"rule", "gate"}, {"", "front door"},
-		{"groupName", "west"}, {"http", "//x"}, {"", "weird:"},
+		{"groupName", "west"}, {"", "http://x"}, {"", "weird:"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %q", got)

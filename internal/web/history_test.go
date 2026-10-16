@@ -77,6 +77,7 @@ func TestEventSearch(t *testing.T) {
 	for _, ev := range []yoursix.Event{yoursix.Sample("device", "vmd"), yoursix.Sample("alarmgroup", "armed")} {
 		ev.EventID = ""
 		ev.EventData["deviceName"] = "CAM_" + ev.EventCode
+		ev.EventData["clipUrl"] = "https://clips.example/" + ev.EventCode
 		if code, body := ta.do(t, ta.alice, "POST", "/api/simulate", ev); code != http.StatusOK {
 			t.Fatalf("simulate: %d %s", code, body)
 		}
@@ -103,6 +104,8 @@ func TestEventSearch(t *testing.T) {
 		"?q=status:ok":                     1,
 		"?q=ip:simulate":                   2,
 		"?q=%22alarmgroup:armed+event%22":  1, // quoted phrase
+		"?q=https://clips.example/vmd":     1, // a URL is free text, not key "https"
+		"?q=https://clips.example":         2,
 		"?since=2000-01-01T00:00:00Z":      2,
 		"?until=2000-01-01T00:00:00Z":      0,
 		"?q=hq&since=2999-01-01T00:00:00Z": 0,

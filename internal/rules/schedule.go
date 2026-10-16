@@ -71,13 +71,17 @@ func (s *Schedule) Validate() error {
 func (w *Window) validate() error {
 	seen := map[string]bool{}
 	days := []string{}
-	for _, d := range w.Days {
-		d = strings.ToLower(strings.TrimSpace(d))
-		if len(d) > 3 {
-			d = d[:3]
+	for _, given := range w.Days {
+		d := strings.ToLower(strings.TrimSpace(given))
+		// Full names ("monday") are accepted too, but nothing else
+		// that merely starts like one ("month").
+		for i, full := range weekdays {
+			if d == strings.ToLower(time.Weekday(i).String()) {
+				d = full
+			}
 		}
 		if !slices.Contains(weekdays, d) {
-			return fmt.Errorf("unknown day %q (use mon … sun)", d)
+			return fmt.Errorf("unknown day %q (use mon … sun)", given)
 		}
 		if !seen[d] {
 			seen[d] = true

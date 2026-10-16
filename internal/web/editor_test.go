@@ -49,6 +49,15 @@ func TestEditConflict(t *testing.T) {
 	if code, body := ta.do(t, ta.alice, "PUT", fmt.Sprintf("/api/requests/%d", reqID), sr); code != http.StatusConflict {
 		t.Fatalf("saved action: %d %s", code, body)
 	}
+
+	// And schedules.
+	sched := map[string]any{"name": "Nights", "windows": []map[string]any{{"from": "22:00", "to": "06:00"}}}
+	schedID := ta.create(t, ta.alice, "/api/schedules", sched)
+	sched["updatedAt"] = "2000-01-01T00:00:00Z"
+	code, body = ta.do(t, ta.bob, "PUT", fmt.Sprintf("/api/schedules/%d", schedID), sched)
+	if code != http.StatusConflict || !strings.Contains(body, `"conflict":true`) || !strings.Contains(body, "this schedule") {
+		t.Fatalf("schedule: %d %s", code, body)
+	}
 }
 
 func TestPreview(t *testing.T) {

@@ -51,12 +51,13 @@ type searchTerm struct{ key, value string }
 var termKey = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]{0,63}):`)
 
 // parseSearch splits a query into terms. "quoted phrases" stay together,
-// in free text and in values (site:"Head office").
+// in free text and in values (site:"Head office"). A word whose colon is
+// followed by "/" is free text, so URLs (http://…) aren't read as keys.
 func parseSearch(s string) []searchTerm {
 	var out []searchTerm
 	for s = strings.TrimSpace(s); s != ""; s = strings.TrimSpace(s) {
 		var t searchTerm
-		if m := termKey.FindStringSubmatch(s); m != nil && len(s) > len(m[0]) && s[len(m[0])] != ' ' {
+		if m := termKey.FindStringSubmatch(s); m != nil && len(s) > len(m[0]) && !strings.ContainsRune(" \t/", rune(s[len(m[0])])) {
 			t.key = m[1]
 			s = s[len(m[0]):]
 		}

@@ -33,17 +33,6 @@ func (s *Store) inTx(ctx context.Context, fn func(q querier) error) error {
 	return tx.Commit()
 }
 
-// stamp is a row's stored updated_at, exactly as written, so an UPDATE can
-// require it to be unchanged ("AND updated_at = ?").
-func stamp(ctx context.Context, q querier, table string, id int64) (string, error) {
-	var v string
-	err := q.QueryRowContext(ctx, `SELECT updated_at FROM `+table+` WHERE id=?`, id).Scan(&v)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
-	}
-	return v, err
-}
-
 // checkRefs confirms, inside a rule's save, that the schedule and saved
 // actions it points at still exist. Their deletes check for users in their
 // own transactions, so together a rule can never point at nothing.

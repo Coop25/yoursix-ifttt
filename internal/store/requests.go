@@ -185,18 +185,10 @@ func (s *Store) UpdateRequest(ctx context.Context, sr rules.SavedRequest, by Edi
 		if err := checkFresh(KindAction, sr.UpdatedAt, before.UpdatedAt, before.UpdatedByName, before); err != nil {
 			return err
 		}
-		was, err := stamp(ctx, q, "requests", sr.ID)
-		if err != nil {
+		if _, err := q.ExecContext(ctx,
+			`UPDATE requests SET name=?, description=?, params_json=?, request_json=?, updated_by=?, updated_by_name=?, updated_at=? WHERE id=?`,
+			sr.Name, sr.Description, string(params), string(req), by.ID, by.Name, now(), sr.ID); err != nil {
 			return err
-		}
-		res, err := q.ExecContext(ctx,
-			`UPDATE requests SET name=?, description=?, params_json=?, request_json=?, updated_by=?, updated_by_name=?, updated_at=? WHERE id=? AND updated_at=?`,
-			sr.Name, sr.Description, string(params), string(req), by.ID, by.Name, now(), sr.ID, was)
-		if err != nil {
-			return err
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return ConflictError{Kind: KindAction, Current: before, By: before.UpdatedByName, At: before.UpdatedAt}
 		}
 		updated, err := savedRequest(ctx, q, sr.ID)
 		if err != nil {

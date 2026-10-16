@@ -387,19 +387,12 @@ func (s *Store) UpdateRule(ctx context.Context, r rules.Rule, by Editor) (RuleVi
 		if err := checkFresh(KindRule, r.UpdatedAt, before.UpdatedAt, before.UpdatedByName, before); err != nil {
 			return err
 		}
-		was, err := stamp(ctx, q, "rules", r.ID)
-		if err != nil {
+		// The read above and this write share the store's one connection,
+		// so nothing can change the row in between.
+		if _, err := q.ExecContext(ctx,
+			`UPDATE rules SET name=?, enabled=?, trigger_json=?, actions_json=?, cooldown_seconds=?, cooldown_from=?, skip_if_running=?, updated_at=?, updated_by=?, updated_by_name=?, schedule_id=?, on_failure_json=? WHERE id=?`,
+			r.Name, boolInt(r.Enabled), enc.trig, enc.acts, r.CooldownSeconds, r.CooldownFrom, boolInt(r.SkipIfRunning), now(), by.ID, by.Name, r.ScheduleID, enc.onFail, r.ID); err != nil {
 			return err
-		}
-		res, err := q.ExecContext(ctx,
-			`UPDATE rules SET name=?, enabled=?, trigger_json=?, actions_json=?, cooldown_seconds=?, cooldown_from=?, skip_if_running=?, updated_at=?, updated_by=?, updated_by_name=?, schedule_id=?, on_failure_json=? WHERE id=? AND updated_at=?`,
-			r.Name, boolInt(r.Enabled), enc.trig, enc.acts, r.CooldownSeconds, r.CooldownFrom, boolInt(r.SkipIfRunning), now(), by.ID, by.Name, r.ScheduleID, enc.onFail, r.ID, was)
-		if err != nil {
-			return err
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			// Changed between the check and the write.
-			return ConflictError{Kind: KindRule, Current: before, By: before.UpdatedByName, At: before.UpdatedAt}
 		}
 		updated, err := getRule(ctx, q, r.ID)
 		if err != nil {

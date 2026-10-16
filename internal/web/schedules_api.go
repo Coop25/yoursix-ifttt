@@ -2,25 +2,11 @@ package web
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 
 	"yoursix-ifttt/internal/rules"
 	"yoursix-ifttt/internal/store"
 )
-
-// checkSchedule verifies the schedule a rule picks exists.
-func (s *Server) checkSchedule(r *http.Request, rule rules.Rule) error {
-	if rule.ScheduleID == 0 {
-		return nil
-	}
-	if _, err := s.store.Schedule(r.Context(), rule.ScheduleID); errors.Is(err, store.ErrNotFound) {
-		return fmt.Errorf("schedule #%d doesn't exist", rule.ScheduleID)
-	} else if err != nil {
-		return err
-	}
-	return nil
-}
 
 func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 	list, err := s.store.ListSchedules(r.Context())
