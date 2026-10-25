@@ -57,6 +57,9 @@ func (s *SavedRequest) Validate() error {
 	}
 	// The rule using it supplies the label and error handling.
 	s.Request.Name, s.Request.ContinueOnError = "", false
+	if s.Request.Watch != nil {
+		return errors.New("a saved delay can't watch for events; add the watch to a delay in the rule")
+	}
 	if err := s.Request.validate(); err != nil {
 		return err
 	}

@@ -193,7 +193,7 @@ function triggerSummary(t) {
 function actionSummary(a) {
   const label = a.name ? `${a.name}: ` : "";
   if (a.type === "http") return `${label}${a.method || "GET"} ${a.url}${a.auth ? ` (${a.auth} auth)` : ""}`;
-  if (a.type === "delay") return `${label}wait ${a.delayMillis} ms`;
+  if (a.type === "delay") return `${label}wait ${a.delayMillis} ms${a.watch ? `, ${watchSummary(a.watch)}` : ""}`;
   if (a.type === "discord") {
     const n = a.discord?.embeds?.length || 0;
     const extras = [n ? `${n} embed${n === 1 ? "" : "s"}` : "", a.discord?.pingUsers?.length || a.discord?.pingRoles?.length ? "pings" : "", a.discord?.silent ? "silent" : ""].filter(Boolean);
@@ -205,6 +205,21 @@ function actionSummary(a) {
     return `${label}Saved action: ${sr ? sr.name : `#${a.requestId} (missing)`}${params ? ` (${params})` : ""}`;
   }
   return label + a.type;
+}
+
+// watchSummary describes a delay's watch: "watching the rule's trigger:
+// restart (up to 30m), then stop".
+function watchSummary(w) {
+  const t = w.trigger || {};
+  const what = w.sameAsTrigger ? "the rule's trigger" : [...(t.topics || []), ...(t.codes || [])].join(", ") || "events";
+  const extra = (t.filters || []).length ? ` (${t.filters.length} filter${t.filters.length === 1 ? "" : "s"})` : "";
+  const does = [
+    w.restart ? `restart (up to ${fmtDuration(Math.round(w.maxMillis / 1000))})` : "",
+    w.actions?.length ? `${w.actions.map(actionSummary).join("; ")}${w.everyMatch ? " each time" : ""}` : "",
+    w.stop ? "stop" : "",
+  ].filter(Boolean);
+  const quiet = w.ifNoMatch?.length ? `; if none: ${w.ifNoMatch.map(actionSummary).join("; ")}` : "";
+  return `watching ${what}${extra}${does.length ? ": " + does.join(", then ") : ""}${quiet}`;
 }
 
 function ruleCard(r) {
@@ -343,7 +358,26 @@ function renderSteps(steps) {
       s.target ? h("div.muted.small", {}, s.target) : null,
       s.error ? h("div.error", {}, s.error) : null,
       s.response ? h("pre", {}, s.response) : null,
+      s.watch ? watchDetail(s.watch) : null,
     )]));
+}
+
+// watchDetail shows what a watched delay saw, and its actions' results
+// grouped by the match that ran them.
+function watchDetail(w) {
+  const failed = (w.steps || []).filter((s) => !s.ok && !s.skipped).length;
+  const parts = [`${w.matches} matching event${w.matches === 1 ? "" : "s"}`,
+    w.restarts ? `countdown restarted ${w.restarts}×` : "", w.stopped ? "stopped the rule" : ""].filter(Boolean);
+  const groups = [];
+  for (const s of w.steps || []) {
+    const last = groups[groups.length - 1];
+    if (last && last.match === s.match) last.steps.push(s);
+    else groups.push({ match: s.match, steps: [s] });
+  }
+  return h("div.watch-detail", {},
+    h("div.muted.small", {}, "While waiting: ", parts.join(" · "), failed ? h("span.error", {}, ` · ${failed} action${failed === 1 ? "" : "s"} failed`) : null),
+    groups.map((g) => [h("div.step-group", {}, g.match ? `On match ${g.match}` : "Nothing matched"), renderSteps(g.steps)]),
+    w.dropped ? h("p.muted.small", {}, `${w.dropped} more results not kept.`) : null);
 }
 
 function showResult(title, ...body) {
@@ -587,14 +621,20 @@ function pillPicker(container, { placeholder, empty, options, onchange, warnUnkn
   return { values, refresh, set };
 }
 
-function addFilterRow(f) {
+function addFilterRow(f, container = $("#f-filters")) {
   const row = $("#tpl-filter").content.firstElementChild.cloneNode(true);
   $(".ff-field", row).value = f.field || "";
   $(".ff-op", row).value = f.op || "equals";
   $(".ff-value", row).value = f.value || "";
   $(".ff-del", row).addEventListener("click", () => row.remove());
-  $("#f-filters").append(row);
+  container.append(row);
 }
+
+const readFilters = (container) => $$(":scope > .filter-row", container).map((row) => ({
+  field: $(".ff-field", row).value.trim(),
+  op: $(".ff-op", row).value,
+  value: $(".ff-value", row).value,
+})).filter((f) => f.field);
 
 const field = (label, input) => [h("span.muted", {}, label), input];
 
@@ -642,6 +682,8 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
     grid = h("div.action-grid", {},
       fixed ? null : field("Name", inp("name", { placeholder: "optional label" })),
       field("Delay (ms)", inp("delayMillis", { type: "number", min: 1, max: 600000 })));
+    // Only a rule's own delays can watch for events.
+    if (!fixed && container.id === "f-actions") box.append(head, grid, watchSection(a, box));
   } else if (a.type === "discord") {
     grid = discordActionGrid(a, inp, fixed);
   } else if (a.type === "request") {
@@ -650,9 +692,92 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
     grid = h("pre", {}, JSON.stringify(a, null, 2));
     box.dataset.raw = JSON.stringify(a);
   }
-  box.append(...[head, grid].filter(Boolean));
+  if (!box.childElementCount) box.append(...[head, grid].filter(Boolean));
   container.append(box);
   return box;
+}
+
+// watchSection is a delay's "While waiting, watch for events" settings
+// (a.watch). It sets box._readWatch, which readAction uses.
+function watchSection(a, box) {
+  const w = a.watch || { sameAsTrigger: true, trigger: { filters: [] }, restart: true, maxMillis: 1800000 };
+  const t = w.trigger || {};
+  const on = h("input", { type: "checkbox", class: "w-on", checked: !!a.watch });
+  const same = h("input", { type: "checkbox", class: "w-same", checked: !!w.sameAsTrigger });
+  const topics = h("div.picker"), codes = h("div.picker");
+  let topicPicker = null; // set below; the code picker's options read it
+  const codePicker = pillPicker(codes, {
+    placeholder: "Add an event code…", empty: "Any event code", warnUnknown: true,
+    options: () => {
+      const picked = topicPicker ? topicPicker.values() : [];
+      return (picked.length ? picked : state.catalog.topics).map((tp) => [tp, state.catalog.codes[tp] || []]);
+    },
+  });
+  topicPicker = pillPicker(topics, {
+    placeholder: "Add a topic…", empty: "Any topic",
+    options: () => [[null, state.catalog.topics]],
+    onchange: () => codePicker.refresh(),
+  });
+  topicPicker.set(t.topics || []);
+  codePicker.set(t.codes || []);
+  const own = h("div.w-own", {}, field("Topics", topics), field("Event codes", codes));
+  const filters = h("div.w-filters");
+  (t.filters || []).forEach((f) => addFilterRow(f, filters));
+  const restart = h("input", { type: "checkbox", class: "w-restart", checked: !!w.restart });
+  const maxSecs = h("input.narrow", { type: "number", min: 1, max: 3600, value: Math.round((w.maxMillis || 1800000) / 1000), "aria-label": "Longest wait in seconds" });
+  const runActs = h("input", { type: "checkbox", class: "w-run", checked: !!w.actions?.length });
+  const every = h("input", { type: "checkbox", class: "w-every", checked: !!w.everyMatch });
+  const stop = h("input", { type: "checkbox", class: "w-stop", checked: !!w.stop });
+  const acts = h("div.w-actions"), quiet = h("div.w-nomatch");
+  (w.actions || []).forEach((x) => addActionBox(x, acts));
+  (w.ifNoMatch || []).forEach((x) => addActionBox(x, quiet));
+  const addButtons = (list) => h("div.row", {}, [["discord", "+ Discord message"], ["http", "+ HTTP request"], ["request", "+ Saved action"]].map(([type, label]) =>
+    h("button.btn.small", { type: "button", onclick: () => { addActionBox(blankAction(type), list); schedulePreview(); } }, label)));
+  const actsBlock = h("div.w-sub", {}, acts, addButtons(acts),
+    h("label.inline", {}, every, "Run them on every match, not just the first"));
+
+  const body = h("div.watch-body", {},
+    h("label.inline", {}, same, "Same events as this rule's trigger"),
+    own,
+    h("div.w-label", {}, "Filters ", h("span.muted.small", {}, "Values can use the event that started the run, e.g. deviceName equals ", h("code", {}, "{{ .data.deviceName }}"), " for the same camera.")),
+    filters,
+    h("div.row", {}, h("button.btn.small", { type: "button", onclick: () => addFilterRow({ field: "deviceName", op: "equals", value: "{{ .data.deviceName }}" }, filters) }, "+ Filter")),
+    h("div.w-label", {}, "When one arrives"),
+    h("label.inline", {}, restart, "Restart the countdown, up to ", maxSecs, " seconds in total"),
+    h("label.inline", {}, runActs, "Run actions"),
+    actsBlock,
+    h("label.inline", {}, stop, "Stop the rule (skip its remaining steps)"),
+    h("div.w-label", {}, "If nothing arrives ", h("span.muted.small", {}, "(optional) Runs when the wait ends without a match.")),
+    quiet, addButtons(quiet),
+    h("p.muted.small", {}, "Matching events are still checked against every rule as usual. Actions here see ", h("code", {}, "{{ .watch.matches }}"), ", ",
+      h("code", {}, "{{ .watch.data.deviceName }}"), " (the matched event) and more; so do the rule's later steps."));
+  const sync = () => {
+    body.classList.toggle("hidden", !on.checked);
+    own.classList.toggle("hidden", same.checked);
+    maxSecs.disabled = !restart.checked;
+    actsBlock.classList.toggle("hidden", !runActs.checked);
+  };
+  for (const el of [on, same, restart, runActs]) el.addEventListener("change", sync);
+  sync();
+
+  box._readWatch = () => {
+    if (!on.checked) return null;
+    // Same shape the server saves: the rule's trigger leaves these empty.
+    const out = { trigger: same.checked ? { topics: [], codes: [] } : { topics: topicPicker.values(), codes: codePicker.values() } };
+    out.trigger.filters = readFilters(filters);
+    if (same.checked) out.sameAsTrigger = true;
+    if (restart.checked) Object.assign(out, { restart: true, maxMillis: (Number(maxSecs.value) || 0) * 1000 });
+    if (runActs.checked) {
+      const list = $$(":scope > .action-box", acts).map(readAction);
+      if (list.length) out.actions = list;
+      if (list.length && every.checked) out.everyMatch = true;
+    }
+    if (stop.checked) out.stop = true;
+    const none = $$(":scope > .action-box", quiet).map(readAction);
+    if (none.length) out.ifNoMatch = none;
+    return out;
+  };
+  return h("div.watch-box", {}, h("label.inline.w-toggle", {}, on, h("strong", {}, "While waiting, watch for events")), body);
 }
 
 // discordActionGrid is the form for a "discord" action. Its extra webhook
@@ -822,7 +947,8 @@ function requestActionGrid(a, inp) {
 function readAction(box) {
   if (box.dataset.raw) return JSON.parse(box.dataset.raw);
   const a = { type: box.dataset.type };
-  for (const el of $$("[data-k]", box)) {
+  // A delay's watch holds action boxes of its own; their fields aren't ours.
+  for (const el of $$("[data-k]", box).filter((el) => el.closest(".action-box") === box)) {
     const k = el.dataset.k;
     if (el.type === "checkbox") {
       if (el.checked) a[k] = true;
@@ -853,6 +979,10 @@ function readAction(box) {
     const d = readDiscord(box);
     if (d) a.discord = d;
   }
+  if (a.type === "delay" && box._readWatch) {
+    const w = box._readWatch();
+    if (w) a.watch = w;
+  }
   return a;
 }
 
@@ -866,15 +996,11 @@ function readVisual() {
     trigger: {
       topics: selectedTopics(),
       codes: readCodes(),
-      filters: $$("#f-filters .filter-row").map((row) => ({
-        field: $(".ff-field", row).value.trim(),
-        op: $(".ff-op", row).value,
-        value: $(".ff-value", row).value,
-      })).filter((f) => f.field),
+      filters: readFilters($("#f-filters")),
     },
     ...($("#f-schedule").value ? { scheduleId: Number($("#f-schedule").value) } : {}),
-    actions: $$("#f-actions .action-box").map(readAction),
-    ...($$("#f-onfail .action-box").length ? { onFailure: $$("#f-onfail .action-box").map(readAction) } : {}),
+    actions: $$("#f-actions > .action-box").map(readAction),
+    ...($$("#f-onfail > .action-box").length ? { onFailure: $$("#f-onfail > .action-box").map(readAction) } : {}),
   };
 }
 
@@ -938,6 +1064,11 @@ async function runPreview() {
   });
   show($$("#f-actions > .action-box"), res.actions);
   show($$("#f-onfail > .action-box"), res.onFailure);
+  $$("#f-actions > .action-box").forEach((box, i) => {
+    const w = res.watches?.[i] || {};
+    show($$(".w-actions > .action-box", box), w.actions);
+    show($$(".w-nomatch > .action-box", box), w.ifNoMatch);
+  });
 }
 
 // ---------- events ----------
@@ -1698,9 +1829,10 @@ function runProgress(run, { compact = false } = {}) {
   if (compact) {
     return h("span.progress", { title: `${where}: ${cur.name}` }, h("span.pulse-dot", { "aria-hidden": "true" }), failing ? "failure · " : `${cur.index + 1}/${total} · `, timer);
   }
+  const seen = cur.matches ? ` · ${cur.matches} match${cur.matches === 1 ? "" : "es"}${cur.restarts ? `, restarted ${cur.restarts}×` : ""}` : "";
   const bar = isDelay ? h("div.delay-bar", { "aria-hidden": "true" }, h("div.delay-fill", { "data-start": cur._untilLocal - cur._durationMs, "data-until": cur._untilLocal })) : null;
   return h("div.progress", {},
-    h("div.progress-line", {}, h("span.pulse-dot", { "aria-hidden": "true" }), h("strong", {}, where), ` · ${cur.name} · `, timer),
+    h("div.progress-line", {}, h("span.pulse-dot", { "aria-hidden": "true" }), h("strong", {}, where), ` · ${cur.name} · `, timer, seen),
     bar);
 }
 

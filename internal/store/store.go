@@ -511,6 +511,9 @@ type StepInProgress struct {
 	Until       *time.Time `json:"until,omitempty"` // delays only
 	ElapsedMs   int64      `json:"elapsedMs"`
 	RemainingMs *int64     `json:"remainingMs,omitempty"` // delays only
+	// Matches and Restarts count what a watched delay has seen so far.
+	Matches  int `json:"matches,omitempty"`
+	Restarts int `json:"restarts,omitempty"`
 }
 
 type EventView struct {

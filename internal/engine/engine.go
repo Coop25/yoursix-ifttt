@@ -4,6 +4,7 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -42,7 +43,18 @@ type Engine struct {
 	lastFired    map[int64]time.Time // when the last run started
 	lastFinished map[int64]time.Time // when the last run finished
 	running      map[int64]int       // in-flight runs per rule
+	watchers     map[*watcher]struct{}
 }
+
+// watcher is a watched delay waiting for events that match trigger.
+type watcher struct {
+	trigger rules.Trigger
+	events  chan yoursix.Event
+}
+
+// watchBuffer is how many matches a watched delay can fall behind by (while
+// its actions run) before further ones are dropped.
+const watchBuffer = 32
 
 func New(s *store.Store, r *actions.Runner, sm *secrets.Manager, log *slog.Logger) *Engine {
 	// Saved requests ("request" actions) come from the same store as the rules.
@@ -61,6 +73,7 @@ func New(s *store.Store, r *actions.Runner, sm *secrets.Manager, log *slog.Logge
 		lastFired:    map[int64]time.Time{},
 		lastFinished: map[int64]time.Time{},
 		running:      map[int64]int{},
+		watchers:     map[*watcher]struct{}{},
 	}
 	// Seed cooldowns so a restart doesn't immediately re-fire.
 	if all, err := s.ListRules(ctx); err == nil {
@@ -94,6 +107,7 @@ func (e *Engine) Dispatch(ctx context.Context, ev yoursix.Event, raw []byte, sou
 		e.log.Info("duplicate event ignored", "eventId", ev.EventID, "event", ev.Key())
 		return res, nil
 	}
+	e.notifyWatchers(ev)
 
 	enabled, err := e.store.EnabledRules(ctx)
 	if err != nil {
@@ -148,18 +162,67 @@ func (e *Engine) StartTestRun(ctx context.Context, r rules.Rule, ev yoursix.Even
 	return store.RunView{ID: runID, EventRow: row, RuleID: r.ID, RuleName: r.Name, Status: store.RunRunning, Steps: []actions.StepResult{}}, nil
 }
 
-// stepStarted records which step a run is on (and, for a delay, when it
-// ends), so the UI can show live progress and a countdown.
-func (e *Engine) stepStarted(row, runID int64) func(int, rules.Action, time.Time) {
-	return func(i int, a rules.Action, until time.Time) {
-		cur := store.StepInProgress{Index: i, Type: a.Type, Name: e.stepLabel(a), StartedAt: time.Now()}
-		if !until.IsZero() {
-			cur.Until = &until
-		}
+// stepTracker records which step a run is on (and, for a delay, when it
+// ends), so the UI can show live progress and a countdown. onWatch updates
+// a watched delay's matches and end time; a restart restarts its countdown.
+func (e *Engine) stepTracker(row, runID int64) (onStart func(int, rules.Action, time.Time), onWatch func(int, rules.Action, actions.WatchResult, time.Time)) {
+	var started time.Time
+	restarts := 0
+	save := func(cur store.StepInProgress) {
 		if err := e.store.UpdateRunCurrent(context.Background(), runID, cur); err != nil {
 			e.log.Error("save current step", "run", runID, "err", err)
 		}
 		e.changed(row)
+	}
+	onStart = func(i int, a rules.Action, until time.Time) {
+		started, restarts = time.Now(), 0
+		cur := store.StepInProgress{Index: i, Type: a.Type, Name: e.stepLabel(a), StartedAt: started}
+		if !until.IsZero() {
+			cur.Until = &until
+		}
+		save(cur)
+	}
+	onWatch = func(i int, a rules.Action, w actions.WatchResult, until time.Time) {
+		if w.Restarts != restarts {
+			started, restarts = time.Now(), w.Restarts
+		}
+		save(store.StepInProgress{Index: i, Type: a.Type, Name: e.stepLabel(a), StartedAt: started, Until: &until,
+			Matches: w.Matches, Restarts: w.Restarts})
+	}
+	return onStart, onWatch
+}
+
+// watch subscribes a watched delay to events matching t, until stop.
+func (e *Engine) watch(t rules.Trigger) (<-chan yoursix.Event, func()) {
+	w := &watcher{trigger: t, events: make(chan yoursix.Event, watchBuffer)}
+	e.mu.Lock()
+	e.watchers[w] = struct{}{}
+	e.mu.Unlock()
+	return w.events, func() {
+		e.mu.Lock()
+		delete(e.watchers, w)
+		e.mu.Unlock()
+	}
+}
+
+// notifyWatchers passes ev to every watched delay it matches. A delay that's
+// too far behind misses it rather than holding up the webhook.
+func (e *Engine) notifyWatchers(ev yoursix.Event) {
+	e.mu.Lock()
+	list := make([]*watcher, 0, len(e.watchers))
+	for w := range e.watchers {
+		list = append(list, w)
+	}
+	e.mu.Unlock()
+	for _, w := range list {
+		if !w.trigger.Matches(ev) {
+			continue
+		}
+		select {
+		case w.events <- ev:
+		default:
+			e.log.Warn("watched delay is behind; event dropped", "event", ev.Key(), "eventId", ev.EventID)
+		}
 	}
 }
 
@@ -290,11 +353,15 @@ func (e *Engine) startRun(row int64, r rules.Rule, ev yoursix.Event) {
 // OnFailure; the run still counts as failed.
 func (e *Engine) execute(row, runID int64, r rules.Rule, ev yoursix.Event) {
 	data := ev.TemplateData(r.Name)
+	onStart, onWatch := e.stepTracker(row, runID)
 	opts := actions.RunOptions{
 		Secrets:     e.secrets.LookupFor(e.ctx, r.UpdatedBy),
 		Owner:       r.UpdatedBy,
 		OnStep:      e.progress(row, runID),
-		OnStepStart: e.stepStarted(row, runID),
+		OnStepStart: onStart,
+		Watch:       e.watch,
+		RuleTrigger: r.Trigger,
+		OnWatch:     onWatch,
 	}
 	steps, ok := e.runner.RunWith(e.ctx, r.Actions, data, opts)
 	failure, failed := FailureData(steps, r.Actions)
@@ -370,13 +437,44 @@ func (e *Engine) Forget(ruleID int64) {
 	e.mu.Unlock()
 }
 
+// WatchPreview is the preview of a watched delay's actions.
+type WatchPreview struct {
+	Actions   [][]actions.PreviewField `json:"actions,omitempty"`
+	IfNoMatch [][]actions.PreviewField `json:"ifNoMatch,omitempty"`
+}
+
 // Preview renders every templated value of r's actions (and on-failure
 // actions) against ev, without running anything. Secrets show as
 // placeholders. On-failure actions see a sample .failure for step 1.
-func (e *Engine) Preview(ctx context.Context, r rules.Rule, ev yoursix.Event) (acts, onFailure [][]actions.PreviewField) {
+// watches holds the previews of watched delays' actions by action index;
+// they see a sample .watch in which ev matched once (or, if nothing
+// matched, never).
+func (e *Engine) Preview(ctx context.Context, r rules.Rule, ev yoursix.Event) (acts, onFailure [][]actions.PreviewField, watches map[int]WatchPreview) {
 	data := ev.TemplateData(r.Name)
-	for _, a := range r.Actions {
+	for i, a := range r.Actions {
 		acts = append(acts, e.runner.Preview(ctx, a, data))
+		if a.Watch == nil {
+			continue
+		}
+		matched := maps.Clone(data)
+		matched["watch"] = map[string]any{"matches": 1, "restarts": 0, "stopped": a.Watch.Stop, "waitedMs": 0, "event": data["event"], "data": data["data"]}
+		if len(a.Watch.Actions)+len(a.Watch.IfNoMatch) > 0 {
+			if watches == nil {
+				watches = map[int]WatchPreview{}
+			}
+			var wp WatchPreview
+			for _, w := range a.Watch.Actions {
+				wp.Actions = append(wp.Actions, e.runner.Preview(ctx, w, matched))
+			}
+			quiet := maps.Clone(data)
+			quiet["watch"] = map[string]any{"matches": 0, "restarts": 0, "stopped": false, "waitedMs": a.DelayMillis}
+			for _, w := range a.Watch.IfNoMatch {
+				wp.IfNoMatch = append(wp.IfNoMatch, e.runner.Preview(ctx, w, quiet))
+			}
+			watches[i] = wp
+		}
+		// Later steps see the same sample.
+		data["watch"] = matched["watch"]
 	}
 	if len(r.OnFailure) > 0 {
 		first := "Action 1"
@@ -388,7 +486,7 @@ func (e *Engine) Preview(ctx context.Context, r rules.Rule, ev yoursix.Event) (a
 			onFailure = append(onFailure, e.runner.Preview(ctx, a, data))
 		}
 	}
-	return acts, onFailure
+	return acts, onFailure, watches
 }
 
 // eventTime is when ev happened, for schedule checks: its eventOccurred,

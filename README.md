@@ -88,7 +88,7 @@ A rule has an **If** part, a list of **Then** actions, and an optional cooldown.
 | Type | What it does |
 |---|---|
 | `http` | Any method, URL, headers and body. Auth can be none, `basic`, or `digest` (Axis VAPIX default). Optional self-signed TLS, custom expected status codes, and a timeout. |
-| `delay` | Waits N ms between steps. |
+| `delay` | Waits N ms between steps. It can also [watch for events while it waits](#watching-for-events-during-a-delay). |
 | `discord` | Posts a message and/or rich embeds to a Discord webhook (see below). |
 | `request` | Runs a **saved action** (see below) with values for its parameters. |
 
@@ -132,6 +132,35 @@ Rules can be edited in the form editor or as raw JSON (toggle in the editor). Se
 **Preview templates** (a tick box above the actions) renders every URL, header, body and message as you type, against a sample event for the rule's trigger. Saved actions show their parameters and the values they produce. Secrets appear as `‹secret NAME›`; their values are never sent to the browser. Broken templates show their error in place.
 
 **Edit conflicts.** If someone else saves a rule or saved action while you have it open, your save is refused instead of silently overwriting theirs. You can see what they changed, overwrite with your version, or load theirs. API clients opt in by sending the `updatedAt` they loaded; without it there's no check.
+
+### Watching for events during a delay
+
+A delay in a rule's actions can react to events that arrive while it waits. Tick **While waiting, watch for events** on the delay (`"watch"` in JSON) and choose:
+
+- **Which events:** the rule's own trigger (**Same events as this rule's trigger**), or other topics and codes. Filters narrow it down either way, and their values are templates filled in from the event that started the run. So `deviceName equals {{ .data.deviceName }}` means *the same camera*.
+- **When one arrives**, any of:
+  - **Restart the countdown**, up to a longest wait (at most 1 hour) counted from when the delay began. For example: motion turns a light on, a 5-minute delay keeps it on, and more motion restarts the 5 minutes, so the light only goes off once things are quiet.
+  - **Run actions**: on the first match, or on every match. For example: the gate opened, and motion on the back camera within 30 seconds posts an alert.
+  - **Stop the rule**: skip the rule's remaining steps, for example when a "door closed" event means the alert isn't needed. The run still counts as successful.
+- **If nothing arrives** (optional): actions to run when the wait ends without a single match. For example: the gate opened and nobody badged in within 60 seconds.
+
+Actions run by a watch, and the rule's later steps, see what happened as `{{ .watch.matches }}`, `{{ .watch.restarts }}`, `{{ .watch.stopped }}`, `{{ .watch.waitedMs }}`, and the last matching event as `{{ .watch.event.eventCode }}`, `{{ .watch.data.deviceName }}` and so on. With more than one watched delay, `.watch` describes the latest.
+
+Things to know:
+
+- **Events still match rules as usual.** A watch doesn't swallow events. For a keep-alive rule like the light above, turn on **Ignore while running** so its own motion events restart the countdown instead of starting a second run. They're logged as `busy`.
+- **A failing watch action doesn't interrupt anything.** It's recorded and the run counts as failed, but the wait and the rest of the rule carry on and **If anything fails** doesn't run, as if the action were set to continue on error.
+- **Test events count.** Events from the Setup tab's simulator reach watches like real ones. Running a rule with its **Test** button doesn't send an event, so it doesn't reach other runs' watches.
+- Only a rule's own delays can watch: not saved delays, on-failure actions, or actions run by another watch. A run that is watching takes up one of the 16 run slots until it finishes, the same as any other delay.
+- The run log shows each watched delay's matches and restarts, and the results of its actions grouped by the match that ran them. While it runs, the Rules tab shows something like *Step 1 of 2 · Keep it on · 4:12 left · 3 matches, restarted 3×*.
+
+```json
+{ "type": "delay", "name": "Keep it on", "delayMillis": 300000,
+  "watch": { "sameAsTrigger": true,
+             "trigger": { "filters": [{ "field": "deviceName", "op": "equals", "value": "{{ .data.deviceName }}" }] },
+             "restart": true, "maxMillis": 1800000,
+             "ifNoMatch": [{ "type": "discord", "message": "Motion on {{ .data.deviceName }} stopped quickly" }] } }
+```
 
 ### Saved actions
 

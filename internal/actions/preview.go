@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"yoursix-ifttt/internal/rules"
 )
@@ -37,6 +38,14 @@ func (r *Runner) Preview(ctx context.Context, a rules.Action, data map[string]an
 		out = append(out, PreviewField{Field: field, Value: v})
 	}
 	switch a.Type {
+	case rules.ActionDelay:
+		if a.Watch != nil {
+			for _, f := range a.Watch.Trigger.Filters {
+				if strings.Contains(f.Value, "{{") {
+					add("Watch filter "+f.Field, f.Value, noWatchSecrets)
+				}
+			}
+		}
 	case rules.ActionHTTP, "":
 		add("URL", a.URL, maskSecrets)
 		for _, k := range sortedKeys(a.Headers) {

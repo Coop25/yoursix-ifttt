@@ -406,3 +406,13 @@ pre.diff > span { display: block; padding: 0 10px; white-space: pre-wrap; overfl
 .window-note:empty { display: none; }
 .window-note { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12.5px; }
 .warn-text { color: var(--warn); }
+
+/* A delay's "While waiting, watch for events" settings. */
+.watch-box { border-top: 1px dashed var(--border); padding-top: 8px; display: grid; gap: 8px; }
+.watch-body { display: grid; gap: 8px; padding-left: 12px; border-left: 2px solid color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.w-own { display: grid; grid-template-columns: 120px 1fr; gap: 8px; }
+.w-label { font-weight: 600; margin-top: 4px; }
+.w-sub { display: grid; gap: 8px; padding-left: 24px; }
+.w-sub .action-box, .w-nomatch .action-box { background: var(--panel); }
+.watch-detail { margin-top: 4px; padding-left: 8px; }
+@media (max-width: 640px) { .w-own { grid-template-columns: 1fr; } }

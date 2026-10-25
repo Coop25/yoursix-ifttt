@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"yoursix-ifttt/internal/mocktarget"
@@ -238,5 +239,39 @@ func TestHTTPErrorsAreExplained(t *testing.T) {
 		if ok || !strings.Contains(steps[0].Error, c.want) {
 			t.Errorf("%s: error %q, want it to contain %q", c.url, steps[0].Error, c.want)
 		}
+	}
+}
+
+// Watch filters are compared with event data, so they can't use secrets,
+// and their templates are checked when the rule is saved.
+func TestWatchFilterChecks(t *testing.T) {
+	watch := func(v string) []rules.Action {
+		return []rules.Action{{Type: rules.ActionDelay, DelayMillis: 5, Watch: &rules.Watch{Stop: true,
+			Trigger: rules.Trigger{Filters: []rules.Filter{{Field: "deviceName", Op: rules.OpEquals, Value: v}}}}}}
+	}
+	if err := ParamSecretRefs(watch(`{{ secret "X" }}`)); err == nil || !strings.Contains(err.Error(), "watch filter 1") {
+		t.Fatalf("secret allowed: %v", err)
+	}
+	if err := ParamSecretRefs(watch(`{{ .data.deviceName }}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckTemplates(watch(`{{ .data.deviceName`)); err == nil {
+		t.Fatal("broken template allowed")
+	}
+}
+
+// Without an event source (e.g. a runner used on its own), a watched delay
+// just waits, then runs its if-no-match actions.
+func TestWatchedDelayWithoutEvents(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	acts := []rules.Action{{Type: rules.ActionDelay, DelayMillis: 20, Watch: &rules.Watch{
+		Trigger:   rules.Trigger{Codes: []string{"vmd"}},
+		IfNoMatch: []rules.Action{{Type: rules.ActionHTTP, Method: "GET", URL: srv.URL}},
+	}}}
+	res, ok := NewRunner("", "test").Run(context.Background(), acts, map[string]any{}, nil)
+	if !ok || len(res) != 1 || res[0].Watch == nil || len(res[0].Watch.Steps) != 1 || hits.Load() != 1 {
+		t.Fatalf("ok=%v res=%+v hits=%d", ok, res, hits.Load())
 	}
 }

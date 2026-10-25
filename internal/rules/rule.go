@@ -108,6 +108,9 @@ type Action struct {
 
 	// delay
 	DelayMillis int `json:"delayMillis,omitempty"`
+	// Watch, on a delay in a rule's own actions, reacts to events that
+	// arrive while it waits.
+	Watch *Watch `json:"watch,omitempty"`
 
 	// discord (webhook URL may also come from Y6IFTTT_DISCORD_WEBHOOK_URL)
 	WebhookURL string          `json:"webhookUrl,omitempty"` // templated
@@ -268,26 +271,8 @@ func (r *Rule) Validate() error {
 	default:
 		return fmt.Errorf("cooldownFrom must be %q or %q", CooldownFromStart, CooldownFromFinish)
 	}
-	for i, t := range r.Trigger.Topics {
-		r.Trigger.Topics[i] = strings.ToLower(strings.TrimSpace(t))
-	}
-	for i, c := range r.Trigger.Codes {
-		r.Trigger.Codes[i] = strings.ToLower(strings.TrimSpace(c))
-	}
-	for i := range r.Trigger.Filters {
-		f := &r.Trigger.Filters[i]
-		f.Field = strings.TrimSpace(f.Field)
-		if f.Field == "" {
-			return fmt.Errorf("filter %d: field is required", i+1)
-		}
-		if !slices.Contains(validOps, f.Op) {
-			return fmt.Errorf("filter %d: unknown op %q", i+1, f.Op)
-		}
-		if f.Op == OpRegex {
-			if _, err := regexp.Compile(f.Value); err != nil {
-				return fmt.Errorf("filter %d: %w", i+1, err)
-			}
-		}
+	if err := r.Trigger.validate(false); err != nil {
+		return err
 	}
 	if len(r.Actions) == 0 {
 		return errors.New("at least one action is required")
@@ -298,6 +283,9 @@ func (r *Rule) Validate() error {
 		}
 	}
 	for i := range r.OnFailure {
+		if r.OnFailure[i].Watch != nil {
+			return fmt.Errorf("on-failure action %d: only the rule's own delays can watch for events", i+1)
+		}
 		if err := r.OnFailure[i].validate(); err != nil {
 			return fmt.Errorf("on-failure action %d: %w", i+1, err)
 		}
@@ -308,13 +296,50 @@ func (r *Rule) Validate() error {
 	return nil
 }
 
-// AllActions is the rule's actions followed by its on-failure actions, for
-// checks that apply to both (templates, secrets, saved-action use).
+// AllActions is the rule's actions followed by its on-failure actions and
+// the actions its delays run while watching, for checks that apply to all
+// of them (templates, secrets, saved-action use).
 func (r Rule) AllActions() []Action {
-	return append(slices.Clip(r.Actions), r.OnFailure...)
+	out := append(slices.Clip(r.Actions), r.OnFailure...)
+	for _, a := range r.Actions {
+		if a.Watch != nil {
+			out = append(append(out, a.Watch.Actions...), a.Watch.IfNoMatch...)
+		}
+	}
+	return out
+}
+
+// validate normalises the trigger. With templated, filter values may be
+// templates (a delay's watch), so regexes using them are checked when run.
+func (t *Trigger) validate(templated bool) error {
+	for i, tp := range t.Topics {
+		t.Topics[i] = strings.ToLower(strings.TrimSpace(tp))
+	}
+	for i, c := range t.Codes {
+		t.Codes[i] = strings.ToLower(strings.TrimSpace(c))
+	}
+	for i := range t.Filters {
+		f := &t.Filters[i]
+		f.Field = strings.TrimSpace(f.Field)
+		if f.Field == "" {
+			return fmt.Errorf("filter %d: field is required", i+1)
+		}
+		if !slices.Contains(validOps, f.Op) {
+			return fmt.Errorf("filter %d: unknown op %q", i+1, f.Op)
+		}
+		if f.Op == OpRegex && !(templated && isTemplated(f.Value)) {
+			if _, err := regexp.Compile(f.Value); err != nil {
+				return fmt.Errorf("filter %d: %w", i+1, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (a *Action) validate() error {
+	if a.Watch != nil && a.Type != ActionDelay {
+		return errors.New("only delays can watch for events")
+	}
 	switch a.Type {
 	case ActionHTTP:
 		a.Method = strings.ToUpper(strings.TrimSpace(a.Method))
@@ -335,6 +360,11 @@ func (a *Action) validate() error {
 	case ActionDelay:
 		if a.DelayMillis <= 0 || a.DelayMillis > 10*60*1000 {
 			return errors.New("delayMillis must be between 1 and 600000")
+		}
+		if a.Watch != nil {
+			if err := a.Watch.validate(a.DelayMillis); err != nil {
+				return err
+			}
 		}
 	case ActionDiscord:
 		if a.Discord != nil {
