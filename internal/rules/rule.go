@@ -298,7 +298,7 @@ func (r *Rule) Validate() error {
 
 // AllActions is the rule's actions followed by its on-failure actions and
 // the actions its delays run while watching, for checks that apply to all
-// of them (templates, secrets, saved-action use).
+// of them (templates, secrets, saved-action use). ActionLabels names them.
 func (r Rule) AllActions() []Action {
 	out := append(slices.Clip(r.Actions), r.OnFailure...)
 	for _, a := range r.Actions {
@@ -307,6 +307,53 @@ func (r Rule) AllActions() []Action {
 		}
 	}
 	return out
+}
+
+// ActionLabels names each entry of AllActions the way the editor shows it,
+// e.g. "action 2", "on-failure action 1" or "action 2, watch action 1".
+func (r Rule) ActionLabels() []string {
+	var out []string
+	for i := range r.Actions {
+		out = append(out, fmt.Sprintf("action %d", i+1))
+	}
+	for i := range r.OnFailure {
+		out = append(out, fmt.Sprintf("on-failure action %d", i+1))
+	}
+	for i, a := range r.Actions {
+		if a.Watch == nil {
+			continue
+		}
+		for j := range a.Watch.Actions {
+			out = append(out, fmt.Sprintf("action %d, watch action %d", i+1, j+1))
+		}
+		for j := range a.Watch.IfNoMatch {
+			out = append(out, fmt.Sprintf("action %d, if-no-match action %d", i+1, j+1))
+		}
+	}
+	return out
+}
+
+// ActionError is a problem with one action in a list, by its index.
+type ActionError struct {
+	Index int
+	Err   error
+}
+
+func (e *ActionError) Error() string { return fmt.Sprintf("action %d: %v", e.Index+1, e.Err) }
+func (e *ActionError) Unwrap() error { return e.Err }
+
+// Relabel rewrites an ActionError about r.AllActions() to name where the
+// action is in the rule. Other errors are returned as they are.
+func (r Rule) Relabel(err error) error {
+	var ae *ActionError
+	if !errors.As(err, &ae) {
+		return err
+	}
+	labels := r.ActionLabels()
+	if ae.Index < 0 || ae.Index >= len(labels) {
+		return err
+	}
+	return fmt.Errorf("%s: %w", labels[ae.Index], ae.Err)
 }
 
 // validate normalises the trigger. With templated, filter values may be

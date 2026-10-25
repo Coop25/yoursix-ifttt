@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"yoursix-ifttt/internal/rules"
@@ -50,12 +51,11 @@ func (r *Runner) watchedDelay(ctx context.Context, i int, a rules.Action, data m
 	res.Watch = out
 	var last yoursix.Event
 	publish := func() {
-		v := map[string]any{"matches": out.Matches, "restarts": out.Restarts, "stopped": out.Stopped, "waitedMs": time.Since(start).Milliseconds()}
+		var lastEv *yoursix.Event
 		if out.Matches > 0 {
-			td := last.TemplateData("")
-			v["event"], v["data"] = td["event"], td["data"]
+			lastEv = &last
 		}
-		data["watch"] = v
+		data["watch"] = WatchData(*out, lastEv, time.Since(start))
 	}
 	runActs := func(acts []rules.Action, match int) {
 		steps, ok := r.RunWith(ctx, acts, data, RunOptions{Secrets: opts.Secrets, Owner: opts.Owner})
@@ -134,6 +134,18 @@ wait:
 	return false, failed, nil
 }
 
+// WatchData is what templates see as .watch after a watched delay has seen
+// w: its counts, how long it has waited, and the last matching event (nil
+// if none) as .watch.event and .watch.data.
+func WatchData(w WatchResult, last *yoursix.Event, waited time.Duration) map[string]any {
+	v := map[string]any{"matches": w.Matches, "restarts": w.Restarts, "stopped": w.Stopped, "waitedMs": waited.Milliseconds()}
+	if last != nil {
+		td := last.TemplateData("")
+		v["event"], v["data"] = td["event"], td["data"]
+	}
+	return v
+}
+
 // renderWatch fills in the templated filter values of a watch's trigger.
 func renderWatch(t rules.Trigger, data map[string]any) (rules.Trigger, error) {
 	out := t
@@ -142,6 +154,12 @@ func renderWatch(t rules.Trigger, data map[string]any) (rules.Trigger, error) {
 		v, err := Render(f.Value, data, noWatchSecrets)
 		if err != nil {
 			return out, fmt.Errorf("watch filter %d: %w", i+1, err)
+		}
+		// Saving can only check a templated regex once it is filled in.
+		if f.Op == rules.OpRegex {
+			if _, err := regexp.Compile(v); err != nil {
+				return out, fmt.Errorf("watch filter %d: the regex %q is invalid once filled in (use regexquote for literal values): %w", i+1, v, err)
+			}
 		}
 		f.Value = v
 		out.Filters[i] = f

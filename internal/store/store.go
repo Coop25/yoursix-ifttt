@@ -281,7 +281,7 @@ func prepare(r *rules.Rule) (encodedRule, error) {
 		return e, err
 	}
 	if err := actions.CheckTemplates(r.AllActions()); err != nil {
-		return e, err
+		return e, r.Relabel(err)
 	}
 	enc := func(v any) string {
 		b, _ := json.Marshal(v) // plain structs; can't fail

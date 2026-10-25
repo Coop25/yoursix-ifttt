@@ -3,6 +3,7 @@ package rules
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -85,7 +86,8 @@ func (w *Watch) validate(delayMillis int) error {
 	}
 	if w.Restart {
 		if w.MaxMillis < delayMillis || w.MaxMillis > MaxWatchMillis {
-			return fmt.Errorf("watch: the longest wait must be between the delay and %d ms (1 hour)", MaxWatchMillis)
+			return fmt.Errorf("watch: the longest wait must be at least the delay (%s s) and at most 1 hour (%d s)",
+				strconv.FormatFloat(float64(delayMillis)/1000, 'f', -1, 64), MaxWatchMillis/1000)
 		}
 	} else {
 		w.MaxMillis = 0

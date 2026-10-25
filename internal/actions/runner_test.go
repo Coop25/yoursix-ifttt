@@ -249,10 +249,10 @@ func TestWatchFilterChecks(t *testing.T) {
 		return []rules.Action{{Type: rules.ActionDelay, DelayMillis: 5, Watch: &rules.Watch{Stop: true,
 			Trigger: rules.Trigger{Filters: []rules.Filter{{Field: "deviceName", Op: rules.OpEquals, Value: v}}}}}}
 	}
-	if err := ParamSecretRefs(watch(`{{ secret "X" }}`)); err == nil || !strings.Contains(err.Error(), "watch filter 1") {
+	if err := ForbiddenSecretRefs(watch(`{{ secret "X" }}`)); err == nil || !strings.Contains(err.Error(), "watch filter 1") {
 		t.Fatalf("secret allowed: %v", err)
 	}
-	if err := ParamSecretRefs(watch(`{{ .data.deviceName }}`)); err != nil {
+	if err := ForbiddenSecretRefs(watch(`{{ .data.deviceName }}`)); err != nil {
 		t.Fatal(err)
 	}
 	if err := CheckTemplates(watch(`{{ .data.deviceName`)); err == nil {
@@ -273,5 +273,22 @@ func TestWatchedDelayWithoutEvents(t *testing.T) {
 	res, ok := NewRunner("", "test").Run(context.Background(), acts, map[string]any{}, nil)
 	if !ok || len(res) != 1 || res[0].Watch == nil || len(res[0].Watch.Steps) != 1 || hits.Load() != 1 {
 		t.Fatalf("ok=%v res=%+v hits=%d", ok, res, hits.Load())
+	}
+}
+
+// regexquote makes a templated regex filter match a value literally, and a
+// regex that's invalid once filled in fails the step instead of silently
+// never matching.
+func TestWatchRegexFilters(t *testing.T) {
+	data := map[string]any{"data": map[string]any{"deviceName": "Cam (1)"}}
+	filter := func(v string) rules.Trigger {
+		return rules.Trigger{Filters: []rules.Filter{{Field: "deviceName", Op: rules.OpRegex, Value: v}}}
+	}
+	got, err := renderWatch(filter("^{{ regexquote .data.deviceName }}$"), data)
+	if err != nil || got.Filters[0].Value != `^Cam \(1\)$` {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if _, err := renderWatch(filter("^{{ .data.deviceName }}[$"), data); err == nil || !strings.Contains(err.Error(), "regexquote") {
+		t.Fatalf("invalid regex: %v", err)
 	}
 }

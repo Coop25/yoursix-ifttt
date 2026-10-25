@@ -196,7 +196,7 @@
     const parts = expr.split("|").map((p) => p.trim());
     const term = (t) => {
       const m = t.match(/^(\w+)\s+(.+)$/);
-      if (m && ["secret", "json", "urlquery", "lower", "upper"].includes(m[1])) {
+      if (m && ["secret", "json", "urlquery", "regexquote", "lower", "upper"].includes(m[1])) {
         const arg = term(m[2]);
         return applyFn(m[1], arg, secretsUsed);
       }
@@ -213,6 +213,7 @@
       case "secret": secretsUsed.add(String(v)); return `‹secret ${v}›`; // values never leave the server; masked here too
       case "json": return JSON.stringify(v ?? null);
       case "urlquery": return encodeURIComponent(v ?? "");
+      case "regexquote": return String(v ?? "").replace(/[\\.+*?()|[\]{}^$]/g, "\\$&");
       case "lower": return String(v ?? "").toLowerCase();
       case "upper": return String(v ?? "").toUpperCase();
     }
@@ -378,6 +379,14 @@
     delete run.current;
   }
 
+  // watchData mirrors actions.WatchData: templates' .watch after a watched
+  // delay has seen out, with last the last matching payload (or null).
+  function watchData(out, last, waitedMs) {
+    const v = { matches: out.matches || 0, restarts: out.restarts || 0, stopped: !!out.stopped, waitedMs };
+    if (last) Object.assign(v, { event: { ...last, key: `${last.eventTopic}:${last.eventCode}` }, data: last.eventData });
+    return v;
+  }
+
   // watchedDelay mirrors actions.watchedDelay: wait, reacting to matching
   // events (passed in by dispatch through S.watchers) as a.watch says.
   async function watchedDelay(e, run, a, data, res, rule) {
@@ -385,17 +394,20 @@
     let until = start + a.delayMillis, last = null, failed = false;
     const limit = w.restart ? start + w.maxMillis : until;
     const out = res.watch = { matches: 0 };
-    const own = (w.trigger?.filters || []).map((f) => ({ ...f, value: render(f.value, data) }));
+    const own = (w.trigger?.filters || []).map((f, i) => {
+      const value = render(f.value, data);
+      if (f.op === "regex") {
+        try { new RegExp(value); } catch (err) { throw new Error(`watch filter ${i + 1}: the regex "${value}" is invalid once filled in (use regexquote for literal values): ${err.message}`); }
+      }
+      return { ...f, value };
+    });
     const t = w.sameAsTrigger
       ? { topics: rule.trigger.topics, codes: rule.trigger.codes, filters: [...(rule.trigger.filters || []), ...own] }
       : { topics: w.trigger?.topics || [], codes: w.trigger?.codes || [], filters: own };
     const queue = [];
     let wake = null;
     const sub = { trigger: t, push: (p) => { queue.push(p); wake?.(); } };
-    const publish = () => {
-      data.watch = { matches: out.matches, restarts: out.restarts || 0, stopped: !!out.stopped, waitedMs: now() - start };
-      if (last) Object.assign(data.watch, { event: { ...last, key: `${last.eventTopic}:${last.eventCode}` }, data: last.eventData });
-    };
+    const publish = () => { data.watch = watchData(out, last, now() - start); };
     const runActs = async (acts, match) => {
       const inner = { steps: [] };
       if (!(await runList(null, inner, acts, data, 0))) failed = true;
@@ -639,10 +651,21 @@
   function validateWatch(w, delayMillis, watchable) {
     if (!watchable) return "actions that run while waiting can't watch for events themselves";
     const t = w.trigger = { topics: [], codes: [], filters: [], ...(w.trigger || {}) };
+    // Like rules.Trigger.validate(true): a templated regex is checked once filled in.
+    for (const [i, f] of t.filters.entries()) {
+      f.field = String(f.field || "").trim();
+      if (!f.field) return `filter ${i + 1}: field is required`;
+      if (!["equals", "not_equals", "contains", "regex", "exists", "not_exists", "starts_with"].includes(f.op)) return `filter ${i + 1}: unknown op "${f.op}"`;
+      if (f.op === "regex" && !String(f.value || "").includes("{{")) {
+        try { new RegExp(f.value || ""); } catch (err) { return `filter ${i + 1}: ${err.message}`; }
+      }
+      // Like actions.ForbiddenSecretRefs, checked when the rule is saved.
+      if (/\{\{[^}]*\bsecret\b/.test(f.value || "")) return `watch filter ${i + 1}: secrets can't be used in watch filters`;
+    }
     if (w.sameAsTrigger) { t.topics = []; t.codes = []; }
     else if (!t.topics.length && !t.codes.length && !t.filters.length) return "watch: pick the events to watch for, or use the rule's trigger";
     if (!w.restart && !w.stop && !w.actions?.length && !w.ifNoMatch?.length) return "watch: choose what happens (restart the countdown, run actions, stop the rule, or run actions if nothing matches)";
-    if (w.restart && !(w.maxMillis >= delayMillis && w.maxMillis <= 3600000)) return "watch: the longest wait must be between the delay and 3600000 ms (1 hour)";
+    if (w.restart && !(w.maxMillis >= delayMillis && w.maxMillis <= 3600000)) return `watch: the longest wait must be at least the delay (${delayMillis / 1000} s) and at most 1 hour (3600 s)`;
     if (!w.restart) delete w.maxMillis;
     if (!w.actions?.length) delete w.everyMatch;
     for (const [name, list] of [["on-match action", w.actions || []], ["if-no-match action", w.ifNoMatch || []]]) {
@@ -874,9 +897,9 @@
         actions.push(previewAction(a, data));
         const w = a.watch;
         if (!w) return;
-        const matched = { ...data, watch: { matches: 1, restarts: 0, stopped: !!w.stop, waitedMs: 0, event: data.event, data: data.data } };
+        const matched = { ...data, watch: watchData({ matches: 1, stopped: w.stop }, ev, 0) };
         if (w.actions?.length || w.ifNoMatch?.length) {
-          const quiet = { ...data, watch: { matches: 0, restarts: 0, stopped: false, waitedMs: a.delayMillis } };
+          const quiet = { ...data, watch: watchData({}, null, a.delayMillis) };
           watches[i] = { actions: (w.actions || []).map((x) => previewAction(x, matched)), ifNoMatch: (w.ifNoMatch || []).map((x) => previewAction(x, quiet)) };
         }
         data.watch = matched.watch;

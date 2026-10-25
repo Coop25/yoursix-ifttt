@@ -523,20 +523,7 @@ function fillVisual(r) {
   $("#f-cooldown-from").value = r.cooldownFrom || "start";
   $("#f-skip-running").checked = !!r.skipIfRunning;
 
-  state.codePicker = pillPicker($("#f-codes"), {
-    placeholder: "Add an event code…", empty: "Any event code", warnUnknown: true,
-    options: () => {
-      const topics = selectedTopics();
-      return (topics.length ? topics : state.catalog.topics).map((t) => [t, state.catalog.codes[t] || []]);
-    },
-  });
-  state.topicPicker = pillPicker($("#f-topics"), {
-    placeholder: "Add a topic…", empty: "Any topic",
-    options: () => [[null, state.catalog.topics]],
-    onchange: () => state.codePicker.refresh(),
-  });
-  state.topicPicker.set(r.trigger.topics);
-  state.codePicker.set(r.trigger.codes);
+  ({ topics: state.topicPicker, codes: state.codePicker } = triggerPickers($("#f-topics"), $("#f-codes"), r.trigger));
 
   $("#f-filters").replaceChildren();
   r.trigger.filters.forEach((flt) => addFilterRow(flt));
@@ -565,6 +552,28 @@ function showScheduleInfo() {
   }
   const on = scheduleActive(s, new Date());
   info.replaceChildren(`${scheduleText(s)} · ${tzLabel(s.timezone)} · `, h(on ? "span.on-now" : "span.off-now", {}, on ? "open now" : "closed now"));
+}
+
+// triggerPickers turns topicsEl and codesEl into a trigger's topic and
+// event code pickers, filled from trigger. The codes offered follow the
+// chosen topics.
+function triggerPickers(topicsEl, codesEl, trigger) {
+  let topics = null; // set below; the code picker's options read it
+  const codes = pillPicker(codesEl, {
+    placeholder: "Add an event code…", empty: "Any event code", warnUnknown: true,
+    options: () => {
+      const picked = topics ? topics.values() : [];
+      return (picked.length ? picked : state.catalog.topics).map((t) => [t, state.catalog.codes[t] || []]);
+    },
+  });
+  topics = pillPicker(topicsEl, {
+    placeholder: "Add a topic…", empty: "Any topic",
+    options: () => [[null, state.catalog.topics]],
+    onchange: () => codes.refresh(),
+  });
+  topics.set(trigger.topics || []);
+  codes.set(trigger.codes || []);
+  return { topics, codes };
 }
 
 const selectedTopics = () => state.topicPicker ? state.topicPicker.values() : [];
@@ -682,8 +691,14 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
     grid = h("div.action-grid", {},
       fixed ? null : field("Name", inp("name", { placeholder: "optional label" })),
       field("Delay (ms)", inp("delayMillis", { type: "number", min: 1, max: 600000 })));
-    // Only a rule's own delays can watch for events.
+    // Only a rule's own delays can watch for events. A watch anywhere else
+    // (typed in JSON) is kept as it is, so saving explains why it's refused
+    // instead of quietly dropping it.
     if (!fixed && container.id === "f-actions") box.append(head, grid, watchSection(a, box));
+    else if (a.watch) {
+      box.dataset.watch = JSON.stringify(a.watch);
+      grid.append(h("p.error.full", {}, "This delay watches for events, which only the rule's own delays can do. Edit or remove the watch in JSON."));
+    }
   } else if (a.type === "discord") {
     grid = discordActionGrid(a, inp, fixed);
   } else if (a.type === "request") {
@@ -705,21 +720,7 @@ function watchSection(a, box) {
   const on = h("input", { type: "checkbox", class: "w-on", checked: !!a.watch });
   const same = h("input", { type: "checkbox", class: "w-same", checked: !!w.sameAsTrigger });
   const topics = h("div.picker"), codes = h("div.picker");
-  let topicPicker = null; // set below; the code picker's options read it
-  const codePicker = pillPicker(codes, {
-    placeholder: "Add an event code…", empty: "Any event code", warnUnknown: true,
-    options: () => {
-      const picked = topicPicker ? topicPicker.values() : [];
-      return (picked.length ? picked : state.catalog.topics).map((tp) => [tp, state.catalog.codes[tp] || []]);
-    },
-  });
-  topicPicker = pillPicker(topics, {
-    placeholder: "Add a topic…", empty: "Any topic",
-    options: () => [[null, state.catalog.topics]],
-    onchange: () => codePicker.refresh(),
-  });
-  topicPicker.set(t.topics || []);
-  codePicker.set(t.codes || []);
+  const { topics: topicPicker, codes: codePicker } = triggerPickers(topics, codes, t);
   const own = h("div.w-own", {}, field("Topics", topics), field("Event codes", codes));
   const filters = h("div.w-filters");
   (t.filters || []).forEach((f) => addFilterRow(f, filters));
@@ -982,6 +983,8 @@ function readAction(box) {
   if (a.type === "delay" && box._readWatch) {
     const w = box._readWatch();
     if (w) a.watch = w;
+  } else if (box.dataset.watch) {
+    a.watch = JSON.parse(box.dataset.watch);
   }
   return a;
 }

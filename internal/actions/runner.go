@@ -522,7 +522,7 @@ func CheckTemplates(actions []rules.Action) error {
 		}
 		for _, f := range fields {
 			if err := CheckTemplate(f); err != nil {
-				return fmt.Errorf("action %d: %w", i+1, err)
+				return &rules.ActionError{Index: i, Err: err}
 			}
 		}
 	}
@@ -553,7 +553,7 @@ func SecretRefs(actions []rules.Action) ([]string, error) {
 		for _, f := range a.Templates() {
 			names, err := SecretNames(f)
 			if err != nil {
-				return nil, fmt.Errorf("action %d: %w", i+1, err)
+				return nil, &rules.ActionError{Index: i, Err: err}
 			}
 			for _, n := range names {
 				seen[n] = struct{}{}
@@ -686,18 +686,18 @@ func nameOr(name, fallback string) string {
 	return fallback
 }
 
-// ParamSecretRefs rejects saved-request parameters and watch filters that
+// ForbiddenSecretRefs rejects saved-request parameters and watch filters that
 // use secrets, so rules can be checked at save time as well as at run time.
-func ParamSecretRefs(actions []rules.Action) error {
+func ForbiddenSecretRefs(actions []rules.Action) error {
 	for i, a := range actions {
 		if a.Watch != nil {
 			for j, v := range a.Watch.Templates() {
 				names, err := SecretNames(v)
 				if err != nil {
-					return fmt.Errorf("action %d, watch filter %d: %w", i+1, j+1, err)
+					return &rules.ActionError{Index: i, Err: fmt.Errorf("watch filter %d: %w", j+1, err)}
 				}
 				if len(names) > 0 {
-					return fmt.Errorf("action %d, watch filter %d: secrets can't be used in watch filters", i+1, j+1)
+					return &rules.ActionError{Index: i, Err: fmt.Errorf("watch filter %d: secrets can't be used in watch filters", j+1)}
 				}
 			}
 		}
@@ -707,10 +707,10 @@ func ParamSecretRefs(actions []rules.Action) error {
 		for k, v := range a.Params {
 			names, err := SecretNames(v)
 			if err != nil {
-				return fmt.Errorf("action %d, parameter %s: %w", i+1, k, err)
+				return &rules.ActionError{Index: i, Err: fmt.Errorf("parameter %s: %w", k, err)}
 			}
 			if len(names) > 0 {
-				return fmt.Errorf("action %d, parameter %s: secrets can't be used in parameters; put the secret in the saved action itself", i+1, k)
+				return &rules.ActionError{Index: i, Err: fmt.Errorf("parameter %s: secrets can't be used in parameters; put the secret in the saved action itself", k)}
 			}
 		}
 	}

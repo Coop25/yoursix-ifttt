@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -28,7 +29,7 @@ func TestWatchValidation(t *testing.T) {
 		{"no events chosen", Rule{Actions: []Action{delay(&Watch{Stop: true})}}, "pick the events"},
 		{"nothing to do", Rule{Actions: []Action{delay(&Watch{Trigger: codes})}}, "choose what happens"},
 		{"restart without limit", Rule{Actions: []Action{delay(&Watch{Trigger: codes, Restart: true})}}, "longest wait"},
-		{"limit under delay", Rule{Actions: []Action{delay(&Watch{Trigger: codes, Restart: true, MaxMillis: 500})}}, "longest wait"},
+		{"limit under delay", Rule{Actions: []Action{delay(&Watch{Trigger: codes, Restart: true, MaxMillis: 500})}}, "at least the delay (1 s)"},
 		{"limit over an hour", Rule{Actions: []Action{delay(&Watch{Trigger: codes, Restart: true, MaxMillis: MaxWatchMillis + 1})}}, "longest wait"},
 		{"not a delay", Rule{Actions: []Action{{Type: ActionDiscord, Message: "x", Watch: &Watch{Trigger: codes, Stop: true}}}}, "only delays"},
 		{"on failure", Rule{Actions: notify, OnFailure: []Action{delay(&Watch{Trigger: codes, Stop: true})}}, "on-failure action 1"},
@@ -100,5 +101,34 @@ func TestSavedDelayCantWatch(t *testing.T) {
 	sr := SavedRequest{Name: "x", Request: Action{Type: ActionDelay, DelayMillis: 5, Watch: &Watch{Trigger: Trigger{Codes: []string{"vmd"}}, Stop: true}}}
 	if err := sr.Validate(); err == nil || !strings.Contains(err.Error(), "saved delay") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// Errors about an entry of AllActions name where it is in the rule.
+func TestRelabel(t *testing.T) {
+	r := Rule{
+		Actions: []Action{{Type: ActionDiscord}, {Type: ActionDelay, Watch: &Watch{
+			Actions:   []Action{{Type: ActionDiscord}},
+			IfNoMatch: []Action{{Type: ActionDiscord}, {Type: ActionDiscord}},
+		}}},
+		OnFailure: []Action{{Type: ActionDiscord}},
+	}
+	labels := r.ActionLabels()
+	if len(labels) != len(r.AllActions()) {
+		t.Fatalf("%d labels for %d actions", len(labels), len(r.AllActions()))
+	}
+	cases := map[int]string{
+		1: "action 2: boom",
+		2: "on-failure action 1: boom",
+		3: "action 2, watch action 1: boom",
+		5: "action 2, if-no-match action 2: boom",
+	}
+	for i, want := range cases {
+		if got := r.Relabel(&ActionError{Index: i, Err: errors.New("boom")}).Error(); got != want {
+			t.Errorf("index %d: %q, want %q", i, got, want)
+		}
+	}
+	if got := r.Relabel(errors.New("other")).Error(); got != "other" {
+		t.Errorf("plain error: %q", got)
 	}
 }

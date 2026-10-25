@@ -3,12 +3,15 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"yoursix-ifttt/internal/actions"
 	"yoursix-ifttt/internal/rules"
 	"yoursix-ifttt/internal/store"
 	"yoursix-ifttt/internal/yoursix"
@@ -53,10 +56,12 @@ func (h *harness) create(r rules.Rule) rules.Rule {
 	return created.Rule
 }
 
+var eventSeq atomic.Int64
+
 // send dispatches ev (given a fresh ID) and returns its event row.
 func (h *harness) send(ev yoursix.Event) int64 {
 	h.t.Helper()
-	ev.EventID = time.Now().Format(time.RFC3339Nano)
+	ev.EventID = fmt.Sprintf("watch-test-%d", eventSeq.Add(1))
 	raw, _ := json.Marshal(ev)
 	res, err := h.eng.Dispatch(context.Background(), ev, raw, "test", false)
 	if err != nil {
@@ -79,6 +84,25 @@ func (h *harness) run(row int64, ruleID int64) store.RunView {
 	}
 	h.t.Fatalf("no run of rule %d on event %d: %+v", ruleID, row, e.Runs)
 	return store.RunView{}
+}
+
+// watching waits until n watched delays are listening, so events sent next
+// are sure to reach them.
+func (h *harness) watching(n int) {
+	h.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		h.eng.mu.Lock()
+		got := len(h.eng.watchers)
+		h.eng.mu.Unlock()
+		if got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			h.t.Fatalf("watchers = %d, want %d", got, n)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 func otherCamera(code string) yoursix.Event {
@@ -106,6 +130,7 @@ func TestWatchRestartsDelay(t *testing.T) {
 
 	start := time.Now()
 	row := h.send(yoursix.Sample("device", "vmd"))
+	h.watching(1)
 	for range 2 {
 		time.Sleep(150 * time.Millisecond)
 		busy := h.send(yoursix.Sample("device", "vmd"))
@@ -132,14 +157,17 @@ func TestWatchRestartLimit(t *testing.T) {
 	r := h.create(rules.Rule{Trigger: rules.Trigger{Codes: []string{"vmd"}}, SkipIfRunning: true,
 		Actions: []rules.Action{{Type: rules.ActionDelay, DelayMillis: 200, Watch: &rules.Watch{SameAsTrigger: true, Restart: true, MaxMillis: 300}}}})
 	row := h.send(yoursix.Sample("device", "vmd"))
-	for range 6 {
-		time.Sleep(60 * time.Millisecond)
+	h.watching(1)
+	// Keep matching for 700ms: without the limit the wait would last until
+	// at least 900ms.
+	for end := time.Now().Add(700 * time.Millisecond); time.Now().Before(end); {
+		time.Sleep(50 * time.Millisecond)
 		h.send(yoursix.Sample("device", "vmd"))
 	}
 	run := h.run(row, r.ID)
 	s := run.Steps[0]
-	if s.Watch == nil || s.Watch.Restarts == 0 || s.DurationMs < 300 || s.DurationMs > 380 {
-		t.Fatalf("delay took %dms (want ~300, its limit), watch %+v", s.DurationMs, s.Watch)
+	if s.Watch == nil || s.Watch.Restarts == 0 || s.DurationMs < 300 || s.DurationMs >= 700 {
+		t.Fatalf("delay took %dms (want about 300, its limit), watch %+v", s.DurationMs, s.Watch)
 	}
 }
 
@@ -152,9 +180,8 @@ func TestWatchFilterTemplates(t *testing.T) {
 			Trigger: rules.Trigger{Filters: []rules.Filter{{Field: "deviceName", Op: rules.OpEquals, Value: "{{ .data.deviceName }}"}}},
 			Stop:    true}}}})
 	row := h.send(yoursix.Sample("device", "vmd"))
-	time.Sleep(50 * time.Millisecond)
-	h.send(otherCamera("vmd")) // another camera: ignored
-	time.Sleep(50 * time.Millisecond)
+	h.watching(1)
+	h.send(otherCamera("vmd"))              // another camera: ignored
 	h.send(yoursix.Sample("device", "vmd")) // same camera: stops the wait
 	run := h.run(row, r.ID)
 	if w := run.Steps[0].Watch; w == nil || w.Matches != 1 || !w.Stopped {
@@ -177,7 +204,7 @@ func TestWatchActionsAndStop(t *testing.T) {
 			{Type: rules.ActionHTTP, URL: rec.url + "/?msg=after"},
 		}})
 	row := h.send(yoursix.Sample("device", "vmd"))
-	time.Sleep(50 * time.Millisecond)
+	h.watching(1)
 	h.send(otherCamera("aoa"))
 	run := h.run(row, r.ID)
 	if run.Status != store.RunOK || !run.Steps[1].Skipped {
@@ -204,8 +231,8 @@ func TestWatchEveryMatch(t *testing.T) {
 				EveryMatch: every,
 			}}}})
 		row := h.send(yoursix.Sample("device", "vmd"))
+		h.watching(1)
 		for range 3 {
-			time.Sleep(30 * time.Millisecond)
 			h.send(yoursix.Sample("device", "aoa"))
 		}
 		h.run(row, r.ID)
@@ -276,5 +303,48 @@ func TestWatchUnsubscribes(t *testing.T) {
 	h.eng.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("%d watchers left", n)
+	}
+}
+
+// A burst of matches is saved at most once a second, and the last one in
+// the burst is still saved, so the live countdown ends up right.
+func TestWatchProgressThrottled(t *testing.T) {
+	h := newHarness(t)
+	r := h.create(rules.Rule{Trigger: rules.Trigger{Codes: []string{"vmd"}},
+		Actions: []rules.Action{{Type: rules.ActionDelay, DelayMillis: 5000, Watch: &rules.Watch{SameAsTrigger: true, Stop: true}}}})
+	ev := yoursix.Sample("device", "vmd")
+	raw, _ := json.Marshal(ev)
+	row, _, err := h.st.InsertEvent(context.Background(), ev, raw, "test", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := h.st.StartRun(context.Background(), row, r, store.RunRunning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saves atomic.Int32
+	h.eng.OnChange = func(int64) { saves.Add(1) }
+	onStart, onWatch := h.eng.stepTracker(row, runID)
+	a := r.Actions[0]
+	onStart(0, a, time.Now().Add(5*time.Second))
+	for n := 1; n <= 5; n++ {
+		onWatch(0, a, actions.WatchResult{Matches: n}, time.Now().Add(5*time.Second))
+	}
+	if got := saves.Load(); got != 1 {
+		t.Fatalf("%d saves straight away, want 1 (the step start)", got)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		run, err := h.st.GetRun(context.Background(), runID)
+		if err == nil && run.Current != nil && run.Current.Matches == 5 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("latest match never saved: %+v %v", run.Current, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := saves.Load(); got != 2 {
+		t.Fatalf("%d saves, want 2", got)
 	}
 }

@@ -165,16 +165,30 @@ func (e *Engine) StartTestRun(ctx context.Context, r rules.Rule, ev yoursix.Even
 // stepTracker records which step a run is on (and, for a delay, when it
 // ends), so the UI can show live progress and a countdown. onWatch updates
 // a watched delay's matches and end time; a restart restarts its countdown.
+//
+// A busy camera can match many times a second, so a watch's updates are
+// saved at most once per watchSaveEvery; the latest one is saved when the
+// interval is up.
 func (e *Engine) stepTracker(row, runID int64) (onStart func(int, rules.Action, time.Time), onWatch func(int, rules.Action, actions.WatchResult, time.Time)) {
-	var started time.Time
-	restarts := 0
-	save := func(cur store.StepInProgress) {
+	var (
+		mu       sync.Mutex // the trailing save runs on a timer goroutine
+		started  time.Time
+		restarts int
+		lastSave time.Time
+		pending  *store.StepInProgress
+		trailing *time.Timer
+	)
+	save := func(cur store.StepInProgress) { // with mu held
+		lastSave = time.Now()
 		if err := e.store.UpdateRunCurrent(context.Background(), runID, cur); err != nil {
 			e.log.Error("save current step", "run", runID, "err", err)
 		}
 		e.changed(row)
 	}
 	onStart = func(i int, a rules.Action, until time.Time) {
+		mu.Lock()
+		defer mu.Unlock()
+		pending = nil // superseded by the new step
 		started, restarts = time.Now(), 0
 		cur := store.StepInProgress{Index: i, Type: a.Type, Name: e.stepLabel(a), StartedAt: started}
 		if !until.IsZero() {
@@ -183,14 +197,39 @@ func (e *Engine) stepTracker(row, runID int64) (onStart func(int, rules.Action, 
 		save(cur)
 	}
 	onWatch = func(i int, a rules.Action, w actions.WatchResult, until time.Time) {
+		mu.Lock()
+		defer mu.Unlock()
 		if w.Restarts != restarts {
 			started, restarts = time.Now(), w.Restarts
 		}
-		save(store.StepInProgress{Index: i, Type: a.Type, Name: e.stepLabel(a), StartedAt: started, Until: &until,
-			Matches: w.Matches, Restarts: w.Restarts})
+		cur := store.StepInProgress{Index: i, Type: a.Type, Name: e.stepLabel(a), StartedAt: started, Until: &until,
+			Matches: w.Matches, Restarts: w.Restarts}
+		wait := watchSaveEvery - time.Since(lastSave)
+		if wait <= 0 {
+			pending = nil
+			save(cur)
+			return
+		}
+		if pending == nil {
+			if trailing != nil {
+				trailing.Stop()
+			}
+			trailing = time.AfterFunc(wait, func() {
+				mu.Lock()
+				defer mu.Unlock()
+				if pending != nil {
+					save(*pending)
+					pending = nil
+				}
+			})
+		}
+		pending = &cur
 	}
 	return onStart, onWatch
 }
+
+// watchSaveEvery limits how often a watched delay's live progress is saved.
+const watchSaveEvery = time.Second
 
 // watch subscribes a watched delay to events matching t, until stop.
 func (e *Engine) watch(t rules.Trigger) (<-chan yoursix.Event, func()) {
@@ -457,7 +496,7 @@ func (e *Engine) Preview(ctx context.Context, r rules.Rule, ev yoursix.Event) (a
 			continue
 		}
 		matched := maps.Clone(data)
-		matched["watch"] = map[string]any{"matches": 1, "restarts": 0, "stopped": a.Watch.Stop, "waitedMs": 0, "event": data["event"], "data": data["data"]}
+		matched["watch"] = actions.WatchData(actions.WatchResult{Matches: 1, Stopped: a.Watch.Stop}, &ev, 0)
 		if len(a.Watch.Actions)+len(a.Watch.IfNoMatch) > 0 {
 			if watches == nil {
 				watches = map[int]WatchPreview{}
@@ -467,7 +506,7 @@ func (e *Engine) Preview(ctx context.Context, r rules.Rule, ev yoursix.Event) (a
 				wp.Actions = append(wp.Actions, e.runner.Preview(ctx, w, matched))
 			}
 			quiet := maps.Clone(data)
-			quiet["watch"] = map[string]any{"matches": 0, "restarts": 0, "stopped": false, "waitedMs": a.DelayMillis}
+			quiet["watch"] = actions.WatchData(actions.WatchResult{}, nil, time.Duration(a.DelayMillis)*time.Millisecond)
 			for _, w := range a.Watch.IfNoMatch {
 				wp.IfNoMatch = append(wp.IfNoMatch, e.runner.Preview(ctx, w, quiet))
 			}

@@ -124,6 +124,7 @@ URL, body, header values, password and message are Go templates:
 {{ .data.deviceName }}  {{ .data.siteName }}  {{ .event.eventCode }}  {{ .event.key }}  {{ .rule }}
 {{ json .data.deviceName }}        -> "CAM-01"  (safe inside JSON bodies)
 {{ urlquery .data.deviceName }}    -> URL-escaped
+{{ regexquote .data.deviceName }}  -> regex-escaped (for regex watch filters)
 {{ secret "CAMERA_PASS" }}         -> your secret CAMERA_PASS (Secrets tab)
 ```
 
@@ -137,7 +138,7 @@ Rules can be edited in the form editor or as raw JSON (toggle in the editor). Se
 
 A delay in a rule's actions can react to events that arrive while it waits. Tick **While waiting, watch for events** on the delay (`"watch"` in JSON) and choose:
 
-- **Which events:** the rule's own trigger (**Same events as this rule's trigger**), or other topics and codes. Filters narrow it down either way, and their values are templates filled in from the event that started the run. So `deviceName equals {{ .data.deviceName }}` means *the same camera*.
+- **Which events:** the rule's own trigger (**Same events as this rule's trigger**), or other topics and codes. Filters narrow it down either way, and their values are templates filled in from the event that started the run. So `deviceName equals {{ .data.deviceName }}` means *the same camera*. In a `regex` filter, use `{{ regexquote .data.deviceName }}` so a name like `Cam (1)` matches literally; a regex that's invalid once filled in fails the step.
 - **When one arrives**, any of:
   - **Restart the countdown**, up to a longest wait (at most 1 hour) counted from when the delay began. For example: motion turns a light on, a 5-minute delay keeps it on, and more motion restarts the 5 minutes, so the light only goes off once things are quiet.
   - **Run actions**: on the first match, or on every match. For example: the gate opened, and motion on the back camera within 30 seconds posts an alert.

@@ -157,7 +157,7 @@ func (m *Manager) LookupFor(ctx context.Context, ownerID string) actions.SecretL
 // CheckRule verifies every secret the actions reference is usable by
 // editorID, so a rule can't be saved pointing at someone else's secret.
 func (m *Manager) CheckRule(ctx context.Context, editorID string, acts []rules.Action) error {
-	if err := actions.ParamSecretRefs(acts); err != nil {
+	if err := actions.ForbiddenSecretRefs(acts); err != nil {
 		return err
 	}
 	refs, err := actions.SecretRefs(acts)
