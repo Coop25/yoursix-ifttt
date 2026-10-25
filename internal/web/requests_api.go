@@ -22,17 +22,17 @@ func (s *Server) checkRequestActions(r *http.Request, editorID string, acts []ru
 		}
 		sr, err := s.store.SavedRequest(r.Context(), a.RequestID)
 		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("action %d: saved action #%d doesn't exist", i+1, a.RequestID)
+			return &rules.ActionError{Index: i, Err: fmt.Errorf("saved action #%d doesn't exist", a.RequestID)}
 		}
 		if err != nil {
 			return err
 		}
 		refs, err := actions.SecretRefs([]rules.Action{sr.Request})
 		if err != nil {
-			return fmt.Errorf("action %d: %w", i+1, err)
+			return &rules.ActionError{Index: i, Err: err}
 		}
 		if len(refs) > 0 && sr.UpdatedBy != editorID {
-			return fmt.Errorf("action %d: saved action %q uses secrets belonging to %s, so only their rules can use it", i+1, sr.Name, nameOr(sr.UpdatedByName, "another admin"))
+			return &rules.ActionError{Index: i, Err: fmt.Errorf("saved action %q uses secrets belonging to %s, so only their rules can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))}
 		}
 		// Templated values count as provided; only presence is checked here.
 		present := make(map[string]string, len(a.Params))
@@ -44,7 +44,7 @@ func (s *Server) checkRequestActions(r *http.Request, editorID string, acts []ru
 			}
 		}
 		if _, err := sr.ResolveParams(present); err != nil {
-			return fmt.Errorf("action %d: %w", i+1, err)
+			return &rules.ActionError{Index: i, Err: err}
 		}
 	}
 	return nil
@@ -174,7 +174,7 @@ func (s *Server) handleTestRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	u := userFrom(r.Context())
 	action := rules.Action{Type: rules.ActionRequest, RequestID: id, Params: req.Params}
-	if err := actions.ParamSecretRefs([]rules.Action{action}); err != nil {
+	if err := actions.ForbiddenSecretRefs([]rules.Action{action}); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

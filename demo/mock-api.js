@@ -65,6 +65,7 @@
   const S = {
     rules: [], requests: [], secrets: [], events: [], nextRule: 1, nextRequest: 1, nextEvent: 1, nextRun: 1,
     lastFired: {}, lastFinished: {}, running: {}, history: [], nextRev: 1, schedules: [], nextSchedule: 1,
+    watchers: new Set(), // watched delays waiting for events (see watchedDelay)
   };
   const stamp = { createdAt: iso(now() - 86400e3 * 3), updatedAt: iso(now() - 3600e3), updatedBy: ME.id, updatedByName: ME.displayName };
 
@@ -195,7 +196,7 @@
     const parts = expr.split("|").map((p) => p.trim());
     const term = (t) => {
       const m = t.match(/^(\w+)\s+(.+)$/);
-      if (m && ["secret", "json", "urlquery", "lower", "upper"].includes(m[1])) {
+      if (m && ["secret", "json", "urlquery", "regexquote", "lower", "upper"].includes(m[1])) {
         const arg = term(m[2]);
         return applyFn(m[1], arg, secretsUsed);
       }
@@ -212,6 +213,7 @@
       case "secret": secretsUsed.add(String(v)); return `‹secret ${v}›`; // values never leave the server; masked here too
       case "json": return JSON.stringify(v ?? null);
       case "urlquery": return encodeURIComponent(v ?? "");
+      case "regexquote": return String(v ?? "").replace(/[\\.+*?()|[\]{}^$]/g, "\\$&");
       case "lower": return String(v ?? "").toLowerCase();
       case "upper": return String(v ?? "").toUpperCase();
     }
@@ -364,7 +366,7 @@
       event: { ...e.payload, key: `${e.payload.eventTopic}:${e.payload.eventCode}` },
       data: e.payload.eventData, rule: rule.name,
     };
-    const ok = await runList(e, run, rule.actions, data, 0);
+    const ok = await runList(e, run, rule.actions, data, 0, false, rule);
     // Like engine.FailureData: failures of continue-on-error steps were
     // chosen to be ignored and don't trigger on-failure actions.
     const f = run.steps.find((s) => !s.ok && !s.skipped && s.error && !rule.actions[s.index]?.continueOnError);
@@ -377,7 +379,74 @@
     delete run.current;
   }
 
-  async function runList(e, run, list, data, offset, onFailure = false) {
+  // watchData mirrors actions.WatchData: templates' .watch after a watched
+  // delay has seen out, with last the last matching payload (or null).
+  function watchData(out, last, waitedMs) {
+    const v = { matches: out.matches || 0, restarts: out.restarts || 0, stopped: !!out.stopped, waitedMs };
+    if (last) Object.assign(v, { event: { ...last, key: `${last.eventTopic}:${last.eventCode}` }, data: last.eventData });
+    return v;
+  }
+
+  // watchedDelay mirrors actions.watchedDelay: wait, reacting to matching
+  // events (passed in by dispatch through S.watchers) as a.watch says.
+  async function watchedDelay(e, run, a, data, res, rule) {
+    const w = a.watch, start = now();
+    let until = start + a.delayMillis, last = null, failed = false;
+    const limit = w.restart ? start + w.maxMillis : until;
+    const out = res.watch = { matches: 0 };
+    const own = (w.trigger?.filters || []).map((f, i) => {
+      const value = render(f.value, data);
+      if (f.op === "regex") {
+        try { new RegExp(value); } catch (err) { throw new Error(`watch filter ${i + 1}: the regex "${value}" is invalid once filled in (use regexquote for literal values): ${err.message}`); }
+      }
+      return { ...f, value };
+    });
+    const t = w.sameAsTrigger
+      ? { topics: rule.trigger.topics, codes: rule.trigger.codes, filters: [...(rule.trigger.filters || []), ...own] }
+      : { topics: w.trigger?.topics || [], codes: w.trigger?.codes || [], filters: own };
+    const queue = [];
+    let wake = null;
+    const sub = { trigger: t, push: (p) => { queue.push(p); wake?.(); } };
+    const publish = () => { data.watch = watchData(out, last, now() - start); };
+    const runActs = async (acts, match) => {
+      const inner = { steps: [] };
+      if (!(await runList(null, inner, acts, data, 0))) failed = true;
+      out.steps = (out.steps || []).concat(inner.steps.map((s) => ({ ...s, match })));
+    };
+    S.watchers.add(sub);
+    try {
+      for (;;) {
+        if (!queue.length) {
+          const left = until - now();
+          if (left <= 0) break;
+          await new Promise((r) => { wake = r; setTimeout(r, left); });
+          wake = null;
+          continue;
+        }
+        last = queue.shift();
+        out.matches++;
+        if (w.restart) {
+          const next = Math.min(now() + a.delayMillis, limit);
+          if (next > until) { until = next; out.restarts = (out.restarts || 0) + 1; run.current.startedAt = iso(); }
+        }
+        if (w.stop) out.stopped = true;
+        publish();
+        Object.assign(run.current, { until: iso(until), matches: out.matches, restarts: out.restarts });
+        changed(e);
+        if (w.actions?.length && (w.everyMatch || out.matches === 1)) await runActs(w.actions, out.matches);
+        if (w.stop) return { stop: true, failed };
+      }
+    } finally {
+      S.watchers.delete(sub);
+    }
+    publish();
+    if (!out.matches && w.ifNoMatch?.length) await runActs(w.ifNoMatch, 0);
+    return { stop: false, failed };
+  }
+
+  // runList runs actions, recording each step in run.steps. With e null
+  // (a watch's actions), nothing is pushed to the live view.
+  async function runList(e, run, list, data, offset, onFailure = false, rule = null) {
     let stopped = false, ok = true;
     for (const [n, a] of list.entries()) {
       const i = n + offset;
@@ -388,9 +457,14 @@
       const saved = a.type === "request" ? S.requests.find((x) => x.id === a.requestId) : null;
       const waitMs = a.type === "delay" ? a.delayMillis : saved?.request.type === "delay" ? saved.request.delayMillis : 0;
       if (waitMs) run.current.until = iso(start + waitMs);
-      changed(e);
+      if (e) changed(e);
       try {
-        if (a.type === "request") {
+        if (a.type === "delay" && a.watch && rule) {
+          const { stop, failed } = await watchedDelay(e, run, a, data, res, rule);
+          // The watch's own failures don't fail this step or stop the rule.
+          if (failed) ok = false;
+          if (stop) stopped = true;
+        } else if (a.type === "request") {
           const sr = saved;
           if (!sr) throw new Error(`saved action #${a.requestId}: not found`);
           if (!res.name) res.name = sr.name;
@@ -411,7 +485,7 @@
       }
       res.durationMs = now() - start;
       run.steps.push(res);
-      changed(e);
+      if (e) changed(e);
     }
     return ok;
   }
@@ -449,6 +523,8 @@
   function dispatch(payload, opts) {
     const e = insertEvent(payload, opts);
     if (!e) return { eventRow: 0, duplicate: true, matchedRules: [] };
+    // Like engine.notifyWatchers: watched delays see the event before rules do.
+    for (const w of S.watchers) if (matches(w.trigger, payload)) w.push(payload);
     const matched = [];
     for (const r of S.rules.filter((x) => x.enabled)) {
       if (!matches(r.trigger, payload)) continue;
@@ -539,22 +615,62 @@
     if (!String(body.name || "").trim()) return "name is required";
     const a = body.request || {};
     if (!["http", "delay", "discord", undefined].includes(a.type)) return `a saved action can't be of type "${a.type}"`;
+    if (a.watch) return "a saved delay can't watch for events; add the watch to a delay in the rule";
     return validateRule({ name: "x", actions: [{ ...a, type: a.type || "http" }] }).replace(/^action 1: /, "");
   }
   function validateRule(r) {
     if (!String(r.name || "").trim()) return "name is required";
     if (!r.actions || !r.actions.length) return "at least one action is required";
     if (r.scheduleId && !S.schedules.some((s) => s.id === r.scheduleId)) return `schedule #${r.scheduleId} doesn't exist`;
-    for (const [i, a] of r.actions.entries()) {
-      if (a.type === "http" && !a.url) return `action ${i + 1}: url is required`;
-      if (a.type === "delay" && !(a.delayMillis > 0)) return `action ${i + 1}: delayMillis must be between 1 and 600000`;
-      if (a.type === "discord" && !a.message && !a.discord?.embeds?.length) return `action ${i + 1}: a message or an embed is required`;
+    const bad = validateActions(r.actions, "action", true);
+    if (bad) return bad;
+    if (r.onFailure?.some((a) => a.watch)) return `on-failure action ${r.onFailure.findIndex((a) => a.watch) + 1}: only the rule's own delays can watch for events`;
+    return validateActions(r.onFailure || [], "on-failure action", false);
+  }
+  function validateActions(list, label, watchable) {
+    for (const [i, a] of list.entries()) {
+      const at = `${label} ${i + 1}`;
+      if (a.watch && a.type !== "delay") return `${at}: only delays can watch for events`;
+      if (a.type === "http" && !a.url) return `${at}: url is required`;
+      if (a.type === "delay" && !(a.delayMillis > 0 && a.delayMillis <= 600000)) return `${at}: delayMillis must be between 1 and 600000`;
+      if (a.type === "discord" && !a.message && !a.discord?.embeds?.length) return `${at}: a message or an embed is required`;
       if (a.type === "request") {
         const sr = S.requests.find((x) => x.id === a.requestId);
-        if (!sr) return `action ${i + 1}: choose a saved action`;
+        if (!sr) return `${at}: choose a saved action`;
         const need = sr.params.find((p) => !p.default && !(a.params || {})[p.name]);
-        if (need) return `action ${i + 1}: saved action "${sr.name}" needs a value for "${need.name}"`;
+        if (need) return `${at}: saved action "${sr.name}" needs a value for "${need.name}"`;
       }
+      if (a.watch) {
+        const bad = validateWatch(a.watch, a.delayMillis, watchable);
+        if (bad) return `${at}: ${bad}`;
+      }
+    }
+    return "";
+  }
+  // validateWatch mirrors rules.Watch.validate, normalising w in place.
+  function validateWatch(w, delayMillis, watchable) {
+    if (!watchable) return "actions that run while waiting can't watch for events themselves";
+    const t = w.trigger = { topics: [], codes: [], filters: [], ...(w.trigger || {}) };
+    // Like rules.Trigger.validate(true): a templated regex is checked once filled in.
+    for (const [i, f] of t.filters.entries()) {
+      f.field = String(f.field || "").trim();
+      if (!f.field) return `filter ${i + 1}: field is required`;
+      if (!["equals", "not_equals", "contains", "regex", "exists", "not_exists", "starts_with"].includes(f.op)) return `filter ${i + 1}: unknown op "${f.op}"`;
+      if (f.op === "regex" && !String(f.value || "").includes("{{")) {
+        try { new RegExp(f.value || ""); } catch (err) { return `filter ${i + 1}: ${err.message}`; }
+      }
+      // Like actions.ForbiddenSecretRefs, checked when the rule is saved.
+      if (/\{\{[^}]*\bsecret\b/.test(f.value || "")) return `watch filter ${i + 1}: secrets can't be used in watch filters`;
+    }
+    if (w.sameAsTrigger) { t.topics = []; t.codes = []; }
+    else if (!t.topics.length && !t.codes.length && !t.filters.length) return "watch: pick the events to watch for, or use the rule's trigger";
+    if (!w.restart && !w.stop && !w.actions?.length && !w.ifNoMatch?.length) return "watch: choose what happens (restart the countdown, run actions, stop the rule, or run actions if nothing matches)";
+    if (w.restart && !(w.maxMillis >= delayMillis && w.maxMillis <= 3600000)) return `watch: the longest wait must be at least the delay (${delayMillis / 1000} s) and at most 1 hour (3600 s)`;
+    if (!w.restart) delete w.maxMillis;
+    if (!w.actions?.length) delete w.everyMatch;
+    for (const [name, list] of [["on-match action", w.actions || []], ["if-no-match action", w.ifNoMatch || []]]) {
+      const bad = validateActions(list, `watch: ${name}`, false);
+      if (bad) return bad;
     }
     return "";
   }
@@ -566,7 +682,9 @@
   function previewAction(a, data) {
     const out = [];
     const add = (field, t) => { if (t) out.push({ field, value: render(t, data) }); };
-    if (a.type === "http") {
+    if (a.type === "delay") {
+      (a.watch?.trigger?.filters || []).forEach((f) => { if (String(f.value || "").includes("{{")) add(`Watch filter ${f.field}`, f.value); });
+    } else if (a.type === "http") {
       add("URL", a.url);
       Object.keys(a.headers || {}).sort().forEach((k) => add(`Header ${k}`, a.headers[k]));
       add("Body", a.body);
@@ -772,9 +890,22 @@
       if (code.includes(":")) [topic, code] = code.split(":");
       const ev = sample(topic, code);
       const data = { event: { ...ev, key: `${ev.eventTopic}:${ev.eventCode}` }, data: ev.eventData, rule: r.name };
-      const actions = (r.actions || []).map((a) => previewAction(a, data));
+      // Like engine.Preview: watch actions, and the steps after a watched
+      // delay, see a sample .watch.
+      const actions = [], watches = {};
+      (r.actions || []).forEach((a, i) => {
+        actions.push(previewAction(a, data));
+        const w = a.watch;
+        if (!w) return;
+        const matched = { ...data, watch: watchData({ matches: 1, stopped: w.stop }, ev, 0) };
+        if (w.actions?.length || w.ifNoMatch?.length) {
+          const quiet = { ...data, watch: watchData({}, null, a.delayMillis) };
+          watches[i] = { actions: (w.actions || []).map((x) => previewAction(x, matched)), ifNoMatch: (w.ifNoMatch || []).map((x) => previewAction(x, quiet)) };
+        }
+        data.watch = matched.watch;
+      });
       data.failure = { step: r.actions?.[0]?.name || "Action 1", stepNumber: 1, error: "sample error: connection refused" };
-      return json(200, { event: ev, matchesTrigger: matches(trigger, ev), actions, onFailure: (r.onFailure || []).map((a) => previewAction(a, data)) });
+      return json(200, { event: ev, matchesTrigger: matches(trigger, ev), actions, onFailure: (r.onFailure || []).map((a) => previewAction(a, data)), watches });
     }],
     ["GET", /^\/api\/history$/, (_, __, url) => {
       const p = url.searchParams;

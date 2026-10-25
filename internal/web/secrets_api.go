@@ -16,11 +16,11 @@ import (
 func (s *Server) ruleEditor(w http.ResponseWriter, r *http.Request, rule rules.Rule) (store.Editor, bool) {
 	u := userFrom(r.Context())
 	if err := s.secrets.CheckRule(r.Context(), u.ID, rule.AllActions()); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, rule.Relabel(err).Error())
 		return store.Editor{}, false
 	}
 	if err := s.checkRequestActions(r, u.ID, rule.AllActions()); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, rule.Relabel(err).Error())
 		return store.Editor{}, false
 	}
 	return editorFor(u), true

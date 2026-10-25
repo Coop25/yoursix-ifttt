@@ -40,6 +40,11 @@ type StepResult struct {
 	DurationMs int64  `json:"durationMs"`
 	// OnFailure marks steps from the rule's on-failure actions.
 	OnFailure bool `json:"onFailure,omitempty"`
+	// Watch is what a watched delay saw while it waited.
+	Watch *WatchResult `json:"watch,omitempty"`
+	// Match, on a watch's action, is the match that ran it (1 = first); 0
+	// means it ran because nothing matched.
+	Match int `json:"match,omitempty"`
 }
 
 // Runner executes action lists.
@@ -71,6 +76,15 @@ type RunOptions struct {
 	// OnStepStart, if set, is called as each action begins. For a delay, until
 	// is when it will end (zero otherwise), so the UI can count down.
 	OnStepStart func(index int, a rules.Action, until time.Time)
+
+	// Watch subscribes watched delays to events. Nil means they just wait
+	// (and run their if-no-match actions).
+	Watch WatchFunc
+	// RuleTrigger is the rule's trigger, for watches that reuse it.
+	RuleTrigger rules.Trigger
+	// OnWatch, if set, is called on each match of a watched delay with what
+	// it has seen so far and when it will now end.
+	OnWatch func(index int, a rules.Action, w WatchResult, until time.Time)
 }
 
 func NewRunner(defaultDiscordWebhook, version string) *Runner {
@@ -123,7 +137,20 @@ func (r *Runner) RunWith(ctx context.Context, actions []rules.Action, data map[s
 			}
 			opts.OnStepStart(i, a, until)
 		}
-		err := r.runOne(ctx, a, data, lk, opts.Owner, &res)
+		var err error
+		if a.Type == rules.ActionDelay && a.Watch != nil {
+			var stop, failed bool
+			stop, failed, err = r.watchedDelay(ctx, i, a, data, opts, start, &res)
+			// The watch's own failures don't fail this step or stop the rule.
+			if failed {
+				ok = false
+			}
+			if stop {
+				stopped = true
+			}
+		} else {
+			err = r.runOne(ctx, a, data, lk, opts.Owner, &res)
+		}
 		res.DurationMs = time.Since(start).Milliseconds()
 		if err != nil {
 			res.Error = err.Error()
@@ -490,9 +517,12 @@ func CheckTemplates(actions []rules.Action) error {
 		for _, v := range a.Params {
 			fields = append(fields, v)
 		}
+		if a.Watch != nil {
+			fields = append(fields, a.Watch.Templates()...)
+		}
 		for _, f := range fields {
 			if err := CheckTemplate(f); err != nil {
-				return fmt.Errorf("action %d: %w", i+1, err)
+				return &rules.ActionError{Index: i, Err: err}
 			}
 		}
 	}
@@ -523,7 +553,7 @@ func SecretRefs(actions []rules.Action) ([]string, error) {
 		for _, f := range a.Templates() {
 			names, err := SecretNames(f)
 			if err != nil {
-				return nil, fmt.Errorf("action %d: %w", i+1, err)
+				return nil, &rules.ActionError{Index: i, Err: err}
 			}
 			for _, n := range names {
 				seen[n] = struct{}{}
@@ -656,20 +686,31 @@ func nameOr(name, fallback string) string {
 	return fallback
 }
 
-// ParamSecretRefs rejects saved-request parameters that use secrets, so
-// rules can be checked at save time as well as at run time.
-func ParamSecretRefs(actions []rules.Action) error {
+// ForbiddenSecretRefs rejects saved-request parameters and watch filters that
+// use secrets, so rules can be checked at save time as well as at run time.
+func ForbiddenSecretRefs(actions []rules.Action) error {
 	for i, a := range actions {
+		if a.Watch != nil {
+			for j, v := range a.Watch.Templates() {
+				names, err := SecretNames(v)
+				if err != nil {
+					return &rules.ActionError{Index: i, Err: fmt.Errorf("watch filter %d: %w", j+1, err)}
+				}
+				if len(names) > 0 {
+					return &rules.ActionError{Index: i, Err: fmt.Errorf("watch filter %d: secrets can't be used in watch filters", j+1)}
+				}
+			}
+		}
 		if a.Type != rules.ActionRequest {
 			continue
 		}
 		for k, v := range a.Params {
 			names, err := SecretNames(v)
 			if err != nil {
-				return fmt.Errorf("action %d, parameter %s: %w", i+1, k, err)
+				return &rules.ActionError{Index: i, Err: fmt.Errorf("parameter %s: %w", k, err)}
 			}
 			if len(names) > 0 {
-				return fmt.Errorf("action %d, parameter %s: secrets can't be used in parameters; put the secret in the saved action itself", i+1, k)
+				return &rules.ActionError{Index: i, Err: fmt.Errorf("parameter %s: secrets can't be used in parameters; put the secret in the saved action itself", k)}
 			}
 		}
 	}

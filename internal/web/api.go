@@ -395,6 +395,6 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	acts, onFailure := s.engine.Preview(r.Context(), req.Rule, ev)
-	writeJSON(w, http.StatusOK, map[string]any{"event": ev, "matchesTrigger": req.Rule.Trigger.Matches(ev), "actions": acts, "onFailure": onFailure})
+	acts, onFailure, watches := s.engine.Preview(r.Context(), req.Rule, ev)
+	writeJSON(w, http.StatusOK, map[string]any{"event": ev, "matchesTrigger": req.Rule.Trigger.Matches(ev), "actions": acts, "onFailure": onFailure, "watches": watches})
 }

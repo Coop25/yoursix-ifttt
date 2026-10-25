@@ -215,6 +215,7 @@
             <li><code>{{ .event.eventCode }}</code>, <code>{{ .event.eventTopic }}</code>, <code>{{ .event.key }}</code>, <code>{{ .rule }}</code></li>
             <li><code>{{ json .data.deviceName }}</code> – JSON-quoted value for JSON bodies</li>
             <li><code>{{ urlquery .data.deviceName }}</code> – URL-escaped value</li>
+            <li><code>{{ regexquote .data.deviceName }}</code> – matches the value literally in a regex watch filter</li>
             <li><code>{{ .params.preset }}</code> – inside a saved action: a value the rule fills in</li>
             <li><code>{{ secret "FRONT_CAM_PASS" }}</code> – one of <em>your</em> secrets (Secrets tab), or an operator env secret <code>Y6IFTTT_SECRET_FRONT_CAM_PASS</code>. The name must be a quoted literal.</li>
           </ul>

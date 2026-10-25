@@ -281,7 +281,7 @@ func prepare(r *rules.Rule) (encodedRule, error) {
 		return e, err
 	}
 	if err := actions.CheckTemplates(r.AllActions()); err != nil {
-		return e, err
+		return e, r.Relabel(err)
 	}
 	enc := func(v any) string {
 		b, _ := json.Marshal(v) // plain structs; can't fail
@@ -511,6 +511,9 @@ type StepInProgress struct {
 	Until       *time.Time `json:"until,omitempty"` // delays only
 	ElapsedMs   int64      `json:"elapsedMs"`
 	RemainingMs *int64     `json:"remainingMs,omitempty"` // delays only
+	// Matches and Restarts count what a watched delay has seen so far.
+	Matches  int `json:"matches,omitempty"`
+	Restarts int `json:"restarts,omitempty"`
 }
 
 type EventView struct {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"text/template"
@@ -46,8 +47,10 @@ func funcMap(lookup SecretLookup) template.FuncMap {
 			return string(b), err
 		},
 		"urlquery": url.QueryEscape,
-		"lower":    strings.ToLower,
-		"upper":    strings.ToUpper,
+		// {{ regexquote .data.deviceName }} matches the value literally in a regex filter.
+		"regexquote": regexp.QuoteMeta,
+		"lower":      strings.ToLower,
+		"upper":      strings.ToUpper,
 		"default": func(def, v any) any {
 			if v == nil || v == "" {
 				return def
