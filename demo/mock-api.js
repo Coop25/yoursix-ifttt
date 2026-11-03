@@ -615,7 +615,7 @@
     if (!String(body.name || "").trim()) return "name is required";
     const a = body.request || {};
     if (!["http", "delay", "discord", undefined].includes(a.type)) return `a saved action can't be of type "${a.type}"`;
-    if (a.watch) return "a saved delay can't watch for events; add the watch to a delay in the rule";
+    // A saved delay may watch (the watch's "same events" means the using rule's trigger).
     return validateRule({ name: "x", actions: [{ ...a, type: a.type || "http" }] }).replace(/^action 1: /, "");
   }
   function validateRule(r) {

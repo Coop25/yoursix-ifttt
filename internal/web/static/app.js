@@ -373,6 +373,7 @@ function watchDetail(w) {
     else groups.push({ match: s.match, steps: [s] });
   }
   return h("div.watch-detail", {},
+    w.note ? h("p.small.warn-text", {}, w.note) : null,
     h("div.muted.small", {}, "While waiting: ", parts.join(" · "), failed ? h("span.error", {}, ` · ${failed} action${failed === 1 ? "" : "s"} failed`) : null),
     groups.map((g) => [h("div.step-group", {}, g.match ? `On match ${g.match}` : "Nothing matched"), renderSteps(g.steps)]),
     w.dropped ? h("p.muted.small", {}, `${w.dropped} more results not kept.`) : null);
@@ -422,27 +423,29 @@ function wireEditor() {
   guardEditor("rule", $("#editor"), $("#editor-cancel"), editorState);
   $("#add-filter").addEventListener("click", () => addFilterRow({ field: "deviceName", op: "equals", value: "" }));
   $("#f-filters-note").textContent = NO_SUGGESTIONS;
-  const addStep = (type, list) => { addActionBox(blankAction(type), list, { open: true }); schedulePreview(); };
-  $$("[data-add-action]").forEach((b) => b.addEventListener("click", () => addStep(b.dataset.addAction, $("#f-actions"))));
-  $$("[data-add-fail]").forEach((b) => b.addEventListener("click", () => addStep(b.dataset.addFail, $("#f-onfail"))));
+  $$("[data-add-action]").forEach((b) => b.addEventListener("click", () => addStepTo(b.dataset.addAction, $("#f-actions"))));
+  $$("[data-add-fail]").forEach((b) => b.addEventListener("click", () => addStepTo(b.dataset.addFail, $("#f-onfail"))));
   $("#f-schedule").addEventListener("change", showScheduleInfo);
   $("#f-enabled").addEventListener("change", showEnabled);
   // The folded sections' summaries follow what's in them.
   $("#f-onfail").addEventListener("stepschange", showOnFailCount);
   for (const type of ["input", "change"]) $("#f-limits-fold").addEventListener(type, showLimits);
-  // The "⋯" and "+ Add step" menus close after a pick, on Esc (without
-  // closing the editor) and on a click elsewhere.
-  for (const menu of $$("#editor details.menu")) {
-    menu.addEventListener("click", (e) => { if (e.target.closest(".menu-item")) menu.open = false; });
-    menu.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape" || !menu.open) return;
+  // The "⋯" and "+ Add step" menus (including those a watch adds, and in
+  // the saved action editor) close after a pick, on Esc (without closing
+  // the dialog) and on a click elsewhere.
+  for (const dlg of [$("#editor"), $("#req-editor")]) {
+    dlg.addEventListener("click", (e) => {
+      for (const m of $$("details.menu[open]", dlg)) if (!m.contains(e.target) || e.target.closest(".menu-item")) m.open = false;
+    });
+    dlg.addEventListener("keydown", (e) => {
+      const menu = e.target.closest?.("details.menu[open]");
+      if (e.key !== "Escape" || !menu) return;
       e.preventDefault();
       e.stopPropagation();
       menu.open = false;
       $("summary", menu).focus();
     });
   }
-  $("#editor").addEventListener("click", (e) => $$("#editor details.menu[open]").forEach((m) => { if (!m.contains(e.target)) m.open = false; }));
   wirePreview();
   $("#editor-json-mode").addEventListener("change", (e) => {
     const err = $("#editor-error");
@@ -473,6 +476,7 @@ function wireEditor() {
     }
     const save = async (expected) => {
       err.textContent = "";
+      $$("#editor .action-box.has-error").forEach((b) => b.classList.remove("has-error"));
       try {
         if (state.editing && state.editing.id) await api("PUT", `/api/rules/${state.editing.id}`, { ...rule, ...(expected ? { updatedAt: expected } : {}) });
         else await api("POST", "/api/rules", rule);
@@ -926,13 +930,13 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false, open = fa
     grid = h("div.action-grid", {},
       fixed ? null : field("Name", inp("name", { placeholder: "optional label" })),
       field("Wait for", box._delay = durationInput({ ms: a.delayMillis ?? 0, maxMs: 600000, label: "Wait" })));
-    // Only a rule's own delays can watch for events. A watch anywhere else
-    // (typed in JSON) is kept as it is, so saving explains why it's refused
-    // instead of quietly dropping it.
-    if (!fixed && container.id === "f-actions") watch = watchSection(a, box);
+    // Only a rule's own delays and the saved action's delay can watch for
+    // events. A watch anywhere else (typed in JSON) is kept as it is, so
+    // saving explains why it's refused instead of quietly dropping it.
+    if (fixed ? container.id === "r-request" : container.id === "f-actions") watch = watchSection(a, box, { saved: fixed });
     else if (a.watch) {
       box.dataset.watch = JSON.stringify(a.watch);
-      grid.append(h("p.error.full", {}, "This delay watches for events, which only the rule's own delays can do. Edit or remove the watch in JSON."));
+      grid.append(h("p.error.full", {}, "This delay watches for events, which only a rule's own delays and a saved delay can do. Edit or remove the watch in JSON."));
     }
   } else if (a.type === "discord") {
     grid = discordActionGrid(a, inp, fixed);
@@ -944,6 +948,7 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false, open = fa
   }
   if (fixed) {
     box.append(grid);
+    if (watch) box.append(watch);
     container.append(box);
     return box;
   }
@@ -985,7 +990,13 @@ function stepHead(box) {
         box.after(copy);
         stepsChanged(list());
       }),
-      tool("Remove step", "✕", () => { const l = list(); box.remove(); stepsChanged(l); }, ".danger")));
+      tool("Remove step", "✕", () => {
+        const l = list();
+        const next = box.nextElementSibling?.matches(".action-box") ? box.nextElementSibling : box.previousElementSibling;
+        box.remove();
+        stepsChanged(l);
+        ($(".step-toggle", next || l) || $("summary", addMenuOf(l) || l))?.focus();
+      }, ".danger")));
 }
 
 function setStepOpen(box, open) {
@@ -1015,9 +1026,28 @@ function stepTitle(a) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+// addStepTo adds a blank step of a type to a list, open, and focuses it.
+function addStepTo(type, list) {
+  const box = addActionBox(blankAction(type), list, { open: true });
+  $(".step-toggle", box).focus();
+  schedulePreview();
+}
+
+// addMenuOf is the "+ Add step" menu that follows a step list.
+const addMenuOf = (list) => (list.nextElementSibling?.matches(".add-menu") ? list.nextElementSibling : null);
+
+// addStepMenu is a "+ Add step" menu for a list; types are [type, label].
+function addStepMenu(list, types) {
+  return h("details.menu.add-menu", {},
+    h("summary.btn.small", {}, "+ Add step"),
+    h("div.menu-list", {}, types.map(([type, label]) => h("button.menu-item", { type: "button", onclick: () => addStepTo(type, list) }, label))));
+}
+
 // watchSection is a delay's "While waiting, watch for events" settings
-// (a.watch). It sets box._readWatch, which readAction uses.
-function watchSection(a, box) {
+// (a.watch). It sets box._readWatch, which readAction uses. With saved, it's
+// in the saved action editor: "the trigger" is that of whichever rule uses
+// the action, which isn't known here, so suggestions cover all events.
+function watchSection(a, box, { saved = false } = {}) {
   const w = a.watch || { sameAsTrigger: true, trigger: { filters: [] }, restart: true, maxMillis: 1800000 };
   const t = w.trigger || {};
   const on = h("input", { type: "checkbox", class: "w-on", checked: !!a.watch });
@@ -1031,7 +1061,8 @@ function watchSection(a, box) {
     note.classList.toggle("hidden", !data || !!data.fields.length);
   });
   let own = [[], []]; // the watch's own topics and codes
-  const refreshStats = () => { if (on.checked) loadStats(...(same.checked ? [selectedTopics(), readCodes()] : own)); };
+  const ruleScope = () => (saved ? [[], []] : [selectedTopics(), readCodes()]);
+  const refreshStats = () => { if (on.checked) loadStats(...(same.checked ? ruleScope() : own)); };
   const { topics: topicPicker, codes: codePicker } = triggerPickers(topics, codes, t, (tp, cp) => {
     own = [tp, cp];
     refreshStats();
@@ -1048,15 +1079,15 @@ function watchSection(a, box) {
   const acts = h("div.w-actions"), quiet = h("div.w-nomatch");
   (w.actions || []).forEach((x) => addActionBox(x, acts));
   (w.ifNoMatch || []).forEach((x) => addActionBox(x, quiet));
-  const addButtons = (list) => h("div.row", {}, [["discord", "+ Discord message"], ["http", "+ HTTP request"], ["request", "+ Saved action"]].map(([type, label]) =>
-    h("button.btn.small", { type: "button", onclick: () => { addActionBox(blankAction(type), list, { open: true }); schedulePreview(); } }, label)));
-  const actsBlock = h("div.w-sub", {}, acts, addButtons(acts),
+  // Waits inside a watch can't watch themselves, so they aren't offered.
+  const addMenu = (list) => addStepMenu(list, [["discord", "Discord message"], ["http", "HTTP request"], ["request", "Saved action"]]);
+  const actsBlock = h("div.w-sub", {}, acts, addMenu(acts),
     h("label.inline", {}, every, "Run them on every match, not just the first"));
 
   const body = h("div.watch-body", {},
-    h("label.inline", {}, same, "Same events as this rule's trigger"),
+    h("label.inline", {}, same, saved ? "Same events as the rule that uses this action" : "Same events as this rule's trigger"),
     ownBox,
-    h("div.w-label", {}, "Filters ", h("span.muted.small", {}, "Values can use the event that started the run, e.g. deviceName equals ", h("code", {}, "{{ .data.deviceName }}"), " for the same camera.")),
+    h("div.w-label", {}, "Filters ", h("span.muted.small", {}, "Values can use the event that started the run, e.g. deviceName equals ", h("code", {}, "{{ .data.deviceName }}"), " for the same camera", saved ? [", or a parameter: ", h("code", {}, "{{ .params.name }}")] : null, ".")),
     filters,
     h("div.row", {}, h("button.btn.small", { type: "button", onclick: () => addFilterRow({ field: "deviceName", op: "equals", value: "{{ .data.deviceName }}" }, filters, rowOpts) }, "+ Add condition")),
     note,
@@ -1066,7 +1097,7 @@ function watchSection(a, box) {
     actsBlock,
     h("label.inline", {}, stop, "Stop the rule (skip its remaining steps)"),
     h("div.w-label", {}, "If nothing arrives ", h("span.muted.small", {}, "(optional) Runs when the wait ends without a match.")),
-    quiet, addButtons(quiet),
+    quiet, addMenu(quiet),
     h("p.muted.small", {}, "Matching events are still checked against every rule as usual. Actions here see ", h("code", {}, "{{ .watch.matches }}"), ", ",
       h("code", {}, "{{ .watch.data.deviceName }}"), " (the matched event) and more; so do the rule's later steps."));
   const sync = () => {
@@ -1077,7 +1108,7 @@ function watchSection(a, box) {
     refreshStats();
   };
   for (const el of [on, same, restart, runActs]) el.addEventListener("change", sync);
-  box.addEventListener("rulescope", () => { if (same.checked) refreshStats(); });
+  if (!saved) box.addEventListener("rulescope", () => { if (same.checked) refreshStats(); });
   sync();
 
   box._readWatch = () => {

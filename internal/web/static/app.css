@@ -247,7 +247,9 @@ span.progress { display: inline-flex; align-items: center; gap: 4px; font-varian
 .pill.unknown > span::after { content: " ⚠"; color: var(--warn); }
 .picker-add { width: 100%; }
 .type-pick { max-width: 320px; margin-bottom: 10px; }
-.action-box.fixed { padding-top: 12px; }
+/* The saved action editor's single action: a step card without the header. */
+.action-box.fixed { padding: 12px 10px 10px; gap: 8px; background: var(--bg); }
+.action-box.fixed > .watch-box { margin-top: 2px; }
 .badge.type { color: var(--accent); }
 
 /* Phones: one column, a scrollable tab strip, full-screen editors, and an
