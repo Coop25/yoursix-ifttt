@@ -3,6 +3,7 @@ package rules
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -86,8 +87,7 @@ func (w *Watch) validate(delayMillis int) error {
 	}
 	if w.Restart {
 		if w.MaxMillis < delayMillis || w.MaxMillis > MaxWatchMillis {
-			return fmt.Errorf("watch: the longest wait must be at least the delay (%s s) and at most 1 hour (%d s)",
-				strconv.FormatFloat(float64(delayMillis)/1000, 'f', -1, 64), MaxWatchMillis/1000)
+			return fmt.Errorf("watch: the longest wait must be at least the delay (%s) and at most 1 hour", fmtSpan(delayMillis))
 		}
 	} else {
 		w.MaxMillis = 0
@@ -115,3 +115,25 @@ func (w *Watch) validate(delayMillis int) error {
 // isTemplated reports whether a filter value is a template, which can only
 // be checked once rendered.
 func isTemplated(s string) bool { return strings.Contains(s, "{{") }
+
+// fmtSpan renders milliseconds like the web UI does: "5 m", "1 h 30 m",
+// "45 s", or "1.5 s" for a sub-minute value with a fractional second.
+func fmtSpan(ms int) string {
+	if ms < 60000 && ms%1000 != 0 {
+		return strconv.FormatFloat(math.Round(float64(ms)/100)/10, 'f', -1, 64) + " s"
+	}
+	total := (ms + 500) / 1000
+	var parts []string
+	for _, u := range []struct {
+		n    int
+		unit string
+	}{{total / 3600, "h"}, {total % 3600 / 60, "m"}, {total % 60, "s"}} {
+		if u.n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", u.n, u.unit))
+		}
+	}
+	if len(parts) == 0 {
+		return "0 s"
+	}
+	return strings.Join(parts, " ")
+}

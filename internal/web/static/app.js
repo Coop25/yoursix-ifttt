@@ -50,7 +50,6 @@ function gatewayMessage(status) {
   return "";
 }
 
-const fmtDuration = (s) => (s % 3600 === 0 && s >= 3600 ? `${s / 3600}h` : s % 60 === 0 && s >= 60 ? `${s / 60}m` : `${s}s`);
 const fmtTime = (s) => (s ? new Date(s).toLocaleString() : "");
 const ago = (s) => {
   if (!s) return "never";
@@ -193,7 +192,7 @@ function triggerSummary(t) {
 function actionSummary(a) {
   const label = a.name ? `${a.name}: ` : "";
   if (a.type === "http") return `${label}${a.method || "GET"} ${a.url}${a.auth ? ` (${a.auth} auth)` : ""}`;
-  if (a.type === "delay") return `${label}wait ${a.delayMillis} ms${a.watch ? `, ${watchSummary(a.watch)}` : ""}`;
+  if (a.type === "delay") return `${label}wait ${fmtSpan(a.delayMillis)}${a.watch ? `, ${watchSummary(a.watch)}` : ""}`;
   if (a.type === "discord") {
     const n = a.discord?.embeds?.length || 0;
     const extras = [n ? `${n} embed${n === 1 ? "" : "s"}` : "", a.discord?.pingUsers?.length || a.discord?.pingRoles?.length ? "pings" : "", a.discord?.silent ? "silent" : ""].filter(Boolean);
@@ -208,13 +207,13 @@ function actionSummary(a) {
 }
 
 // watchSummary describes a delay's watch: "watching the rule's trigger:
-// restart (up to 30m), then stop".
+// keep waiting (up to 30 m), then stop".
 function watchSummary(w) {
   const t = w.trigger || {};
   const what = w.sameAsTrigger ? "the rule's trigger" : [...(t.topics || []), ...(t.codes || [])].join(", ") || "events";
   const extra = (t.filters || []).length ? ` (${t.filters.length} filter${t.filters.length === 1 ? "" : "s"})` : "";
   const does = [
-    w.restart ? `restart (up to ${fmtDuration(Math.round(w.maxMillis / 1000))})` : "",
+    w.restart ? `keep waiting (up to ${fmtSpan(w.maxMillis)})` : "",
     w.actions?.length ? `${w.actions.map(actionSummary).join("; ")}${w.everyMatch ? " each time" : ""}` : "",
     w.stop ? "stop" : "",
   ].filter(Boolean);
@@ -233,7 +232,7 @@ function ruleCard(r) {
       r.enabled ? h("span.badge.ok", {}, "enabled") : h("span.badge", {}, "disabled"),
       active.length ? h("span.badge.running", {}, active.length > 1 ? `running ×${active.length}` : "running") : null,
       r.skipIfRunning ? h("span.badge", { title: "New events are ignored while a run is in progress" }, "one at a time") : null,
-      r.cooldownSeconds ? h("span.badge", { title: `Ignores events for ${r.cooldownSeconds}s after the last run ${r.cooldownFrom === "finish" ? "finished" : "started"}` }, `once per ${fmtDuration(r.cooldownSeconds)}${r.cooldownFrom === "finish" ? " after finish" : ""}`) : null,
+      r.cooldownSeconds ? h("span.badge", { title: `Ignores events for ${fmtSpan(r.cooldownSeconds * 1000)} after the last run ${r.cooldownFrom === "finish" ? "finished" : "started"}` }, `once per ${fmtSpan(r.cooldownSeconds * 1000)}${r.cooldownFrom === "finish" ? " after finish" : ""}`) : null,
       scheduleBadge(r.scheduleId),
       r.onFailure?.length ? h("span.badge", { title: "Runs extra actions when a step fails" }, "handles failures") : null,
       h("span.muted.small", { title: fmtTime(r.lastFiredAt) }, `fired ${ago(r.lastFiredAt)}`),
@@ -519,7 +518,8 @@ async function openEditor(rule) {
 function fillVisual(r) {
   $("#f-name").value = r.name;
   $("#f-enabled").checked = r.enabled;
-  $("#f-cooldown").value = r.cooldownSeconds;
+  state.cooldownInput = durationInput({ ms: r.cooldownSeconds * 1000, maxMs: 0, label: "Cooldown" });
+  $("#f-cooldown").replaceChildren(state.cooldownInput);
   $("#f-cooldown-from").value = r.cooldownFrom || "start";
   $("#f-skip-running").checked = !!r.skipIfRunning;
 
@@ -647,7 +647,34 @@ const readFilters = (container) => $$(":scope > .filter-row", container).map((ro
 
 const field = (label, input) => [h("span.muted", {}, label), input];
 
-const ACTION_LABELS = { http: "HTTP request", delay: "Delay", discord: "Discord message", request: "Saved action" };
+// durationInput is hours, minutes and seconds boxes for a length of time.
+// read() gives milliseconds; a loaded value with a sub-second part is kept
+// as it was until a box is edited. set(ms) refills the boxes, and
+// disable(bool) greys them out.
+function durationInput({ ms = 0, maxMs, label }) {
+  const parts = [["h", "hours", 3600000], ["m", "minutes", 60000], ["s", "seconds", 1000]];
+  const boxes = parts.map(([k, name, unit]) => h("input.dur", {
+    type: "number", min: 0, step: 1, inputmode: "numeric", "aria-label": `${label} ${name}`,
+    max: maxMs && k === "h" ? Math.floor(maxMs / unit) : null,
+  }));
+  const note = h("span.muted.small.dur-note", {});
+  const el = h("span.duration", {}, ...boxes.map((b, i) => [b, h("span.muted", {}, parts[i][0]), " "]), note);
+  let original = ms, edited = false;
+  el.set = (v) => {
+    const sp = splitSpan(v);
+    [sp.h, sp.m, sp.s].forEach((n, i) => { boxes[i].value = n; });
+    original = v;
+    edited = false;
+    note.textContent = sp.exact ? "" : `Saved as ${v} ms; editing will round to whole seconds`;
+  };
+  el.read = () => (!edited && original % 1000 !== 0 ? original : joinSpan(...boxes.map((b) => b.value)));
+  el.disable = (off) => boxes.forEach((b) => { b.disabled = off; });
+  for (const b of boxes) b.addEventListener("input", () => { edited = true; });
+  el.set(ms);
+  return el;
+}
+
+const ACTION_LABELS = { http: "HTTP request", delay: "Wait", discord: "Discord message", request: "Saved action" };
 
 // addActionBox renders an action's form into container (the rule editor's
 // action list by default). With fixed, it's the single action in the saved
@@ -681,7 +708,7 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
       field("Password", inp("password", { placeholder: '{{ secret "CAMERA_PASS" }}' })),
       field("Headers", headers),
       field("Body", body),
-      field("Timeout (s)", inp("timeoutSeconds", { type: "number", min: 0, max: 120 })),
+      field("Give up after (seconds)", inp("timeoutSeconds", { type: "number", min: 0, max: 120 })),
       field("Expect status", inp("expectStatus", { value: (a.expectStatus || []).join(","), placeholder: "default: any 2xx" })),
       field("Options", h("div.row", {},
         h("label.inline", {}, h("input", { type: "checkbox", "data-k": "insecureTLS", checked: !!a.insecureTLS }), "Allow self-signed TLS"),
@@ -690,7 +717,7 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
   } else if (a.type === "delay") {
     grid = h("div.action-grid", {},
       fixed ? null : field("Name", inp("name", { placeholder: "optional label" })),
-      field("Delay (ms)", inp("delayMillis", { type: "number", min: 1, max: 600000 })));
+      field("Wait for", box._delay = durationInput({ ms: a.delayMillis ?? 0, maxMs: 600000, label: "Wait" })));
     // Only a rule's own delays can watch for events. A watch anywhere else
     // (typed in JSON) is kept as it is, so saving explains why it's refused
     // instead of quietly dropping it.
@@ -725,7 +752,7 @@ function watchSection(a, box) {
   const filters = h("div.w-filters");
   (t.filters || []).forEach((f) => addFilterRow(f, filters));
   const restart = h("input", { type: "checkbox", class: "w-restart", checked: !!w.restart });
-  const maxSecs = h("input.narrow", { type: "number", min: 1, max: 3600, value: Math.round((w.maxMillis || 1800000) / 1000), "aria-label": "Longest wait in seconds" });
+  const maxDur = durationInput({ ms: w.maxMillis || 1800000, maxMs: 3600000, label: "Longest wait" });
   const runActs = h("input", { type: "checkbox", class: "w-run", checked: !!w.actions?.length });
   const every = h("input", { type: "checkbox", class: "w-every", checked: !!w.everyMatch });
   const stop = h("input", { type: "checkbox", class: "w-stop", checked: !!w.stop });
@@ -744,7 +771,7 @@ function watchSection(a, box) {
     filters,
     h("div.row", {}, h("button.btn.small", { type: "button", onclick: () => addFilterRow({ field: "deviceName", op: "equals", value: "{{ .data.deviceName }}" }, filters) }, "+ Filter")),
     h("div.w-label", {}, "When one arrives"),
-    h("label.inline", {}, restart, "Restart the countdown, up to ", maxSecs, " seconds in total"),
+    h("label.inline", {}, restart, "Keep waiting up to ", maxDur, " in total"),
     h("label.inline", {}, runActs, "Run actions"),
     actsBlock,
     h("label.inline", {}, stop, "Stop the rule (skip its remaining steps)"),
@@ -755,7 +782,7 @@ function watchSection(a, box) {
   const sync = () => {
     body.classList.toggle("hidden", !on.checked);
     own.classList.toggle("hidden", same.checked);
-    maxSecs.disabled = !restart.checked;
+    maxDur.disable(!restart.checked);
     actsBlock.classList.toggle("hidden", !runActs.checked);
   };
   for (const el of [on, same, restart, runActs]) el.addEventListener("change", sync);
@@ -767,7 +794,7 @@ function watchSection(a, box) {
     const out = { trigger: same.checked ? { topics: [], codes: [] } : { topics: topicPicker.values(), codes: codePicker.values() } };
     out.trigger.filters = readFilters(filters);
     if (same.checked) out.sameAsTrigger = true;
-    if (restart.checked) Object.assign(out, { restart: true, maxMillis: (Number(maxSecs.value) || 0) * 1000 });
+    if (restart.checked) Object.assign(out, { restart: true, maxMillis: maxDur.read() });
     if (runActs.checked) {
       const list = $$(":scope > .action-box", acts).map(readAction);
       if (list.length) out.actions = list;
@@ -965,12 +992,13 @@ function readAction(box) {
       if (codes.length) a.expectStatus = codes;
     } else if (k === "requestId") {
       if (el.value !== "") a.requestId = Number(el.value);
-    } else if (["timeoutSeconds", "delayMillis"].includes(k)) {
+    } else if (k === "timeoutSeconds") {
       if (el.value !== "") a[k] = Number(el.value);
     } else if (el.value !== "") {
       a[k] = el.value;
     }
   }
+  if (a.type === "delay" && box._delay) a.delayMillis = box._delay.read();
   if (a.type === "request") {
     const params = {};
     for (const el of $$("[data-param]", box)) if (el.value !== "") params[el.dataset.param] = el.value;
@@ -993,7 +1021,7 @@ function readVisual() {
   return {
     name: $("#f-name").value.trim(),
     enabled: $("#f-enabled").checked,
-    cooldownSeconds: Number($("#f-cooldown").value) || 0,
+    cooldownSeconds: state.cooldownInput.read() / 1000,
     cooldownFrom: $("#f-cooldown-from").value,
     skipIfRunning: $("#f-skip-running").checked,
     trigger: {

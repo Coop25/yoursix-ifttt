@@ -416,3 +416,7 @@ pre.diff > span { display: block; padding: 0 10px; white-space: pre-wrap; overfl
 .w-sub .action-box, .w-nomatch .action-box { background: var(--panel); }
 .watch-detail { margin-top: 4px; padding-left: 8px; }
 @media (max-width: 640px) { .w-own { grid-template-columns: 1fr; } }
+
+.duration { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.duration input.dur { width: 64px; }
+.duration .dur-note:empty { display: none; }

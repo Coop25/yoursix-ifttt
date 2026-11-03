@@ -164,13 +164,13 @@
         <label class="inline"><input type="checkbox" id="f-skip-running"> Ignore new events while this rule is still running</label>
         <div class="row">
           <span>Run at most once every</span>
-          <input id="f-cooldown" type="number" min="0" class="narrow" aria-label="Cooldown seconds">
-          <span>seconds, counted from when the last run</span>
+          <span id="f-cooldown"></span>
+          <span>counted from when the last run</span>
           <select id="f-cooldown-from">
             <option value="start">started</option>
             <option value="finish">finished</option>
           </select>
-          <span class="muted small">(0 = no limit)</span>
+          <span class="muted small">(all zeros = no limit)</span>
         </div>
         <div class="row">
           <label class="inline">Only run during <select id="f-schedule" aria-label="Schedule"></select></label>
@@ -194,7 +194,7 @@
         <div id="f-actions"></div>
         <div class="row">
           <button type="button" class="btn small" data-add-action="http">+ HTTP request</button>
-          <button type="button" class="btn small" data-add-action="delay">+ Delay</button>
+          <button type="button" class="btn small" data-add-action="delay">+ Wait</button>
           <button type="button" class="btn small" data-add-action="discord">+ Discord message</button>
           <button type="button" class="btn small" data-add-action="request">+ Saved action</button>
         </div>
@@ -248,7 +248,7 @@
       <label class="type-pick">What it does
         <select id="r-type">
           <option value="http">HTTP request</option>
-          <option value="delay">Delay</option>
+          <option value="delay">Wait</option>
           <option value="discord">Discord message</option>
         </select>
       </label>
