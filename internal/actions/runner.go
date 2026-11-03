@@ -96,6 +96,10 @@ type RunOptions struct {
 	// inWatch is set while running a watch's own actions, where a delay can't
 	// watch for events itself.
 	inWatch bool
+	// savedWait is the saved wait whose watch's actions are running, if any.
+	// Its owner chose the parameters those actions get, so a secret-using
+	// saved action among them must also have been last saved by that owner.
+	savedWait *rules.SavedRequest
 }
 
 func NewRunner(defaultDiscordWebhook, version string) *Runner {
@@ -162,7 +166,7 @@ func (r *Runner) RunWith(ctx context.Context, actions []rules.Action, data map[s
 		} else if a.Type == rules.ActionRequest {
 			var sr rules.SavedRequest
 			var withParams map[string]any
-			sr, withParams, err = r.resolveSaved(ctx, a, data, lk, opts.Owner, &res)
+			sr, withParams, err = r.resolveSaved(ctx, a, data, lk, opts.Owner, opts.savedWait, &res)
 			switch {
 			case err != nil:
 			case sr.Request.Type == rules.ActionDelay && sr.Request.Watch != nil:
@@ -177,6 +181,7 @@ func (r *Runner) RunWith(ctx context.Context, actions []rules.Action, data map[s
 				var stop, failed bool
 				// Progress reports the rule's step, not the delay inside it.
 				wopts := opts
+				wopts.savedWait = &sr
 				if opts.OnWatch != nil {
 					wopts.OnWatch = func(idx int, _ rules.Action, w WatchResult, until time.Time) {
 						opts.OnWatch(idx, a, w, until)
@@ -616,6 +621,35 @@ func SecretRefs(actions []rules.Action) ([]string, error) {
 	return out, nil
 }
 
+// SavedSecretRefs returns every secret a saved action uses: its own, and for
+// a saved wait, those of the saved actions its watch runs. Saved actions can't
+// themselves be "request" actions, and a watch can't run a watching delay, so
+// that one level is all that can run. A called action that can't be loaded is
+// skipped; its step fails when it runs, and it is checked again then.
+func SavedSecretRefs(ctx context.Context, src SavedRequestSource, sr rules.SavedRequest) ([]string, error) {
+	acts := sr.AllActions()
+	refs, err := SecretRefs(acts)
+	if err != nil || src == nil {
+		return refs, err
+	}
+	for _, a := range acts[1:] {
+		if a.Type != rules.ActionRequest {
+			continue
+		}
+		called, err := src.SavedRequest(ctx, a.RequestID)
+		if err != nil {
+			continue
+		}
+		more, err := SecretRefs(called.AllActions())
+		if err != nil {
+			return nil, fmt.Errorf("saved action %q: %w", called.Name, err)
+		}
+		refs = append(refs, more...)
+	}
+	sort.Strings(refs)
+	return slices.Compact(refs), nil
+}
+
 // explainHTTPError turns the usual network failures into messages that say
 // what to check. Rules typically call devices on the LAN, so the common
 // cause is that the app's container can't reach the device.
@@ -677,9 +711,10 @@ func noSecrets(string) (string, error) {
 }
 
 // resolveSaved loads the saved action a refers to, checks its secrets belong
-// to owner, and renders the rule's parameters. It returns the saved action and
-// data with .params added.
-func (r *Runner) resolveSaved(ctx context.Context, a rules.Action, data map[string]any, lk SecretLookup, owner string, res *StepResult) (rules.SavedRequest, map[string]any, error) {
+// to owner (and to wait's owner, when a saved wait's watch runs it), and
+// renders the rule's parameters. It returns the saved action and data with
+// .params added.
+func (r *Runner) resolveSaved(ctx context.Context, a rules.Action, data map[string]any, lk SecretLookup, owner string, wait *rules.SavedRequest, res *StepResult) (rules.SavedRequest, map[string]any, error) {
 	if r.Requests == nil {
 		return rules.SavedRequest{}, nil, errors.New("saved actions are not available")
 	}
@@ -691,12 +726,12 @@ func (r *Runner) resolveSaved(ctx context.Context, a rules.Action, data map[stri
 		res.Name = sr.Name
 	}
 	// Re-checked at run time, against the action as it is now.
-	refs, err := SecretRefs(sr.AllActions())
+	refs, err := SavedSecretRefs(ctx, r.Requests, sr)
 	if err != nil {
 		return sr, nil, fmt.Errorf("saved action %q: %w", sr.Name, err)
 	}
-	if len(refs) > 0 && sr.UpdatedBy != owner {
-		return sr, nil, fmt.Errorf("saved action %q uses secrets belonging to %s; only their rules can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))
+	if len(refs) > 0 && (sr.UpdatedBy != owner || wait != nil && sr.UpdatedBy != wait.UpdatedBy) {
+		return sr, nil, fmt.Errorf("saved action %q uses secrets belonging to %s; only their rules and saved actions can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))
 	}
 
 	given := make(map[string]string, len(a.Params))
@@ -723,7 +758,9 @@ func (r *Runner) resolveSaved(ctx context.Context, a rules.Action, data map[stri
 // runSavedRequest runs a saved action (an HTTP request, delay or Discord
 // message) with the rule's parameter values.
 func (r *Runner) runSavedRequest(ctx context.Context, a rules.Action, data map[string]any, lk SecretLookup, owner string, res *StepResult) error {
-	sr, withParams, err := r.resolveSaved(ctx, a, data, lk, owner, res)
+	// RunWith resolves request actions itself, including a watch's, so no
+	// saved wait applies here.
+	sr, withParams, err := r.resolveSaved(ctx, a, data, lk, owner, nil, res)
 	if err != nil {
 		return err
 	}

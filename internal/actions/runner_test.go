@@ -482,6 +482,71 @@ func TestSavedDelayWatchSecretsOwnerOnly(t *testing.T) {
 	}
 }
 
+// savedWaitCalling is saved wait 1, last saved by waitOwner, whose on-match
+// action runs saved action 2 (sr).
+func savedWaitCalling(waitOwner string, sr rules.SavedRequest) fakeSaved {
+	sr.ID = 2
+	return fakeSaved{
+		1: {ID: 1, Name: "Wait", UpdatedBy: waitOwner, Request: rules.Action{Type: rules.ActionDelay, DelayMillis: 30,
+			Watch: &rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}, Actions: []rules.Action{{Type: rules.ActionRequest, RequestID: 2}}}}},
+		2: sr,
+	}
+}
+
+// A saved wait that calls a secret-using saved action carries that action's
+// secrets: it only runs for rules of the admin who saved both.
+func TestSavedWaitCallingSecretActionOwnerOnly(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	withSecret := rules.SavedRequest{Name: "Call", UpdatedBy: "alice", UpdatedByName: "Alice",
+		Request: rules.Action{Type: rules.ActionHTTP, Method: "GET", URL: srv.URL + `?k={{ secret "CAM_PASS" }}`}}
+	secrets := func(string) (string, error) { return "alices-secret", nil }
+	run := func(waitOwner string) ([]StepResult, bool) {
+		return savedRunner(savedWaitCalling(waitOwner, withSecret)).RunWith(context.Background(),
+			[]rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{},
+			RunOptions{Owner: "alice", Secrets: secrets, Watch: oneEvent})
+	}
+
+	// Bob saved the wait (before saves were checked); Alice's rule uses it.
+	res, ok := run("bob")
+	if ok || hits.Load() != 0 || len(res) != 1 || !strings.Contains(res[0].Error, "only their rules") {
+		t.Fatalf("bob's wait: ok=%v hits=%d res=%+v", ok, hits.Load(), res)
+	}
+	// Alice's own wait runs.
+	res, ok = run("alice")
+	if !ok || hits.Load() != 1 {
+		t.Fatalf("alice's wait: ok=%v hits=%d res=%+v", ok, hits.Load(), res)
+	}
+}
+
+// The check is repeated when the watch's action runs: here the called action
+// only starts using secrets after the wait has started.
+func TestSavedWaitCallingSecretActionRecheckedInWatch(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	src := savedWaitCalling("bob", rules.SavedRequest{Name: "Call", UpdatedBy: "alice", UpdatedByName: "Alice",
+		Request: rules.Action{Type: rules.ActionHTTP, Method: "GET", URL: srv.URL}})
+	// Subscribing happens after the wait has been resolved and checked.
+	watch := func(t rules.Trigger) (<-chan yoursix.Event, func()) {
+		sr := src[2]
+		sr.Request.URL = srv.URL + `?k={{ secret "CAM_PASS" }}`
+		src[2] = sr
+		return oneEvent(t)
+	}
+	secrets := func(string) (string, error) { return "alices-secret", nil }
+	res, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}},
+		map[string]any{}, RunOptions{Owner: "alice", Secrets: secrets, Watch: watch})
+	if ok || hits.Load() != 0 || len(res) != 1 || res[0].Watch == nil || len(res[0].Watch.Steps) != 1 {
+		t.Fatalf("ok=%v hits=%d res=%+v", ok, hits.Load(), res)
+	}
+	want := `saved action "Call" uses secrets belonging to Alice; only their rules and saved actions can use it`
+	if got := res[0].Watch.Steps[0].Error; got != want {
+		t.Fatalf("watch step error %q, want %q", got, want)
+	}
+}
+
 func TestSavedRequestAllActionsCoverWatch(t *testing.T) {
 	sr := rules.SavedRequest{Request: rules.Action{Type: rules.ActionDelay, DelayMillis: 10, Watch: &rules.Watch{
 		Actions:   []rules.Action{{Type: rules.ActionHTTP, URL: `{{ secret "A" }}`}},

@@ -60,7 +60,7 @@ func (r *Runner) watchedDelay(ctx context.Context, i int, a rules.Action, data m
 		data["watch"] = WatchData(*out, lastEv, time.Since(start))
 	}
 	runActs := func(acts []rules.Action, match int) {
-		steps, ok := r.RunWith(ctx, acts, data, RunOptions{Secrets: opts.Secrets, Owner: opts.Owner, inWatch: true})
+		steps, ok := r.RunWith(ctx, acts, data, RunOptions{Secrets: opts.Secrets, Owner: opts.Owner, inWatch: true, savedWait: opts.savedWait})
 		if !ok {
 			failed = true
 		}

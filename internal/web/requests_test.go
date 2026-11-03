@@ -286,6 +286,48 @@ func TestSavedWaitWatchActionSecretOwnership(t *testing.T) {
 	}
 }
 
+// A saved wait whose watch calls a secret-using saved action: only that
+// action's owner may save it, and it then carries the action's secrets.
+func TestSavedWaitCallingSecretActionOwnership(t *testing.T) {
+	ta := newTwoAdmins(t)
+	ta.do(t, ta.alice, "PUT", "/api/secrets/CAM_PASS", map[string]string{"value": secretValue})
+	withSecret := ta.create(t, ta.alice, "/api/requests", ta.savedRequest(true))
+	wait := map[string]any{
+		"name": "Wait then PTZ", "request": map[string]any{"type": "delay", "delayMillis": 5,
+			"watch": map[string]any{"trigger": map[string]any{"codes": []string{"vmd"}},
+				"ifNoMatch": []map[string]any{{"type": "request", "requestId": withSecret,
+					"params": map[string]string{"preset": "x"}}}}},
+	}
+	const want = `if-no-match action 1: saved action \"PTZ preset\" uses secrets belonging to alice, so only their rules and saved actions can use it`
+
+	// Bob can't save a wait that calls Alice's secret-using action: he
+	// chooses its parameters.
+	if code, body := ta.do(t, ta.bob, "POST", "/api/requests", wait); code != 400 || !strings.Contains(body, want) {
+		t.Fatalf("bob creating: %d %s", code, body)
+	}
+	plain := ta.create(t, ta.bob, "/api/requests", map[string]any{"name": "Bob's wait", "request": map[string]any{"type": "delay", "delayMillis": 5}})
+	if code, body := ta.do(t, ta.bob, "PUT", fmt.Sprintf("/api/requests/%d", plain), wait); code != 400 || !strings.Contains(body, want) {
+		t.Fatalf("bob updating his wait: %d %s", code, body)
+	}
+	// Alice can, and then Bob can't edit hers.
+	aliceWait := ta.create(t, ta.alice, "/api/requests", wait)
+	if code, body := ta.do(t, ta.bob, "PUT", fmt.Sprintf("/api/requests/%d", aliceWait), wait); code != 400 || !strings.Contains(body, want) {
+		t.Fatalf("bob updating alice's wait: %d %s", code, body)
+	}
+
+	// The wait now uses Alice's secrets, so only her rules can use it (Bob
+	// stands in for any third admin).
+	if code, body := ta.do(t, ta.bob, "POST", "/api/rules", ruleUsing("bob", aliceWait, nil)); code != 400 || !strings.Contains(body, `saved action \"Wait then PTZ\" uses secrets belonging to alice`) {
+		t.Fatalf("bob using alice's wait: %d %s", code, body)
+	}
+	if code, body := ta.do(t, ta.alice, "POST", "/api/rules", ruleUsing("alice", aliceWait, nil)); code != 201 {
+		t.Fatalf("alice using her wait: %d %s", code, body)
+	}
+	if _, body := ta.do(t, ta.alice, "GET", "/api/secrets", nil); !strings.Contains(body, "Saved action: Wait then PTZ") {
+		t.Fatalf("secrets used-by misses the wait: %s", body)
+	}
+}
+
 func TestOnFailureRejectsWatchingSavedWait(t *testing.T) {
 	ta := newTwoAdmins(t)
 	watching := ta.create(t, ta.alice, "/api/requests", map[string]any{

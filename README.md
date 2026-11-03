@@ -173,7 +173,7 @@ Rules use one with **+ Add step → Saved action**. Pick the saved action, then 
 
 **Saved actions and secrets.** Parameters can change where an action goes, for example a `host` parameter in a URL. So:
 
-- A saved action that uses secrets runs with the secrets of the admin who last saved it, and **only that admin's rules can use it**. This is checked when a rule is saved and again on every run.
+- A saved action that uses secrets runs with the secrets of the admin who last saved it, and **only that admin's rules and saved waits can use it**. A saved wait whose watch runs it uses those secrets too. This is checked when a rule or saved action is saved and again on every run.
 - Saved actions without secrets can be used by anyone.
 - Parameter values can't use `{{ secret }}`. Put the secret in the saved action itself.
 

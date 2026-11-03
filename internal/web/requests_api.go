@@ -33,12 +33,12 @@ func (s *Server) checkRequestActions(r *http.Request, editorID string, acts []ru
 		if err != nil {
 			return err
 		}
-		refs, err := actions.SecretRefs(sr.AllActions())
+		refs, err := actions.SavedSecretRefs(r.Context(), s.store, sr)
 		if err != nil {
 			return &rules.ActionError{Index: i, Err: err}
 		}
 		if len(refs) > 0 && sr.UpdatedBy != editorID {
-			return &rules.ActionError{Index: i, Err: fmt.Errorf("saved action %q uses secrets belonging to %s, so only their rules can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))}
+			return &rules.ActionError{Index: i, Err: fmt.Errorf("saved action %q uses secrets belonging to %s, so only their rules and saved actions can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))}
 		}
 		// Templated values count as provided; only presence is checked here.
 		present := make(map[string]string, len(a.Params))
@@ -87,10 +87,18 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // requestEditor checks the secrets a saved request uses belong to the admin
-// saving it (who becomes its owner), like rules.
+// saving it (who becomes its owner), like rules, including those of saved
+// actions its watch runs.
 func (s *Server) requestEditor(w http.ResponseWriter, r *http.Request, sr rules.SavedRequest) (store.Editor, bool) {
 	u := userFrom(r.Context())
 	if err := s.secrets.CheckRule(r.Context(), u.ID, sr.AllActions()); err != nil {
+		writeError(w, http.StatusBadRequest, sr.Relabel(err).Error())
+		return store.Editor{}, false
+	}
+	if !s.checkSavedWatch(w, r, sr) {
+		return store.Editor{}, false
+	}
+	if err := s.checkRequestActions(r, u.ID, sr.AllActions()); err != nil {
 		writeError(w, http.StatusBadRequest, sr.Relabel(err).Error())
 		return store.Editor{}, false
 	}
@@ -104,9 +112,6 @@ func (s *Server) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	by, ok := s.requestEditor(w, r, sr)
 	if !ok {
-		return
-	}
-	if !s.checkSavedWatch(w, r, sr) {
 		return
 	}
 	created, err := s.store.CreateRequest(r.Context(), sr, by)
@@ -131,9 +136,6 @@ func (s *Server) handleUpdateRequest(w http.ResponseWriter, r *http.Request) {
 	sr.ID = id
 	by, ok := s.requestEditor(w, r, sr)
 	if !ok {
-		return
-	}
-	if !s.checkSavedWatch(w, r, sr) {
 		return
 	}
 	updated, err := s.store.UpdateRequest(r.Context(), sr, by)
