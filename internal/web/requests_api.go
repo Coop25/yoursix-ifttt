@@ -244,3 +244,24 @@ func (s *Server) checkNestedWatch(ctx context.Context, w *rules.Watch) error {
 	}
 	return nil
 }
+
+// checkOnFailureWatch rejects on-failure steps that run a saved delay that
+// watches for events: on-failure steps can't watch.
+func (s *Server) checkOnFailureWatch(ctx context.Context, onFailure []rules.Action) error {
+	for i, a := range onFailure {
+		if a.Type != rules.ActionRequest {
+			continue
+		}
+		sr, err := s.store.SavedRequest(ctx, a.RequestID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue // checkRequestActions reports it
+		}
+		if err != nil {
+			return err
+		}
+		if sr.Request.Watch != nil {
+			return fmt.Errorf("on-failure action %d: %w", i+1, actions.OnFailureWatchError(sr.Name))
+		}
+	}
+	return nil
+}

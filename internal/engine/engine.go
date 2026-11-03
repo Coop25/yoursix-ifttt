@@ -430,6 +430,7 @@ func (e *Engine) execute(row, runID int64, r rules.Rule, ev yoursix.Event, noRul
 		save, started := opts.OnStep, opts.OnStepStart
 		opts.OnStep = func(s []actions.StepResult) { save(mark(s)) }
 		opts.OnStepStart = func(i int, a rules.Action, until time.Time) { started(i+len(main), a, until) }
+		opts.InOnFailure = true
 		extra, _ := e.runner.RunWith(e.ctx, r.OnFailure, data, opts)
 		steps = mark(extra)
 	}

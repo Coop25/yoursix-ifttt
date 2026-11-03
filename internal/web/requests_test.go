@@ -285,3 +285,24 @@ func TestSavedWaitWatchActionSecretOwnership(t *testing.T) {
 		t.Fatalf("secret in a watch action's parameters: %d %s", code, body)
 	}
 }
+
+func TestOnFailureRejectsWatchingSavedWait(t *testing.T) {
+	ta := newTwoAdmins(t)
+	watching := ta.create(t, ta.alice, "/api/requests", map[string]any{
+		"name": "Watcher", "request": map[string]any{"type": "delay", "delayMillis": 5,
+			"watch": map[string]any{"trigger": map[string]any{"codes": []string{"vmd"}}, "stop": true}},
+	})
+	plain := ta.create(t, ta.alice, "/api/requests", map[string]any{"name": "Pause", "request": map[string]any{"type": "delay", "delayMillis": 5}})
+	rule := ruleUsing("on failure", watching, nil)
+	rule["onFailure"] = []map[string]any{{"type": "request", "requestId": plain}, {"type": "request", "requestId": watching}}
+	code, body := ta.do(t, ta.alice, "POST", "/api/rules", rule)
+	want := `on-failure action 2: saved action \"Watcher\" watches for events, which steps in \"If something goes wrong\" can't do`
+	if code != 400 || !strings.Contains(body, want) {
+		t.Fatalf("%d %s", code, body)
+	}
+	// The rule's own steps can still use it.
+	delete(rule, "onFailure")
+	if code, body := ta.do(t, ta.alice, "POST", "/api/rules", rule); code != 201 {
+		t.Fatalf("as a step: %d %s", code, body)
+	}
+}

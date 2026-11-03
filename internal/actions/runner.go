@@ -89,6 +89,9 @@ type RunOptions struct {
 	// NoRule is set when a saved action is tested on its own, so a watch that
 	// follows the rule's trigger has no trigger to follow.
 	NoRule bool
+	// InOnFailure is set while running a rule's on-failure actions, which
+	// can't watch for events.
+	InOnFailure bool
 
 	// inWatch is set while running a watch's own actions, where a delay can't
 	// watch for events itself.
@@ -165,6 +168,10 @@ func (r *Runner) RunWith(ctx context.Context, actions []rules.Action, data map[s
 			case sr.Request.Type == rules.ActionDelay && sr.Request.Watch != nil:
 				if opts.inWatch {
 					err = fmt.Errorf("saved action %q watches for events, so it can't run while another delay is watching", sr.Name)
+					break
+				}
+				if opts.InOnFailure {
+					err = OnFailureWatchError(sr.Name)
 					break
 				}
 				var stop, failed bool
@@ -734,6 +741,12 @@ func (r *Runner) runResolved(ctx context.Context, sr rules.SavedRequest, withPar
 		return r.runOne(ctx, sr.Request, withParams, lk, owner, res)
 	}
 	return fmt.Errorf("saved action %q can't run actions of type %q", sr.Name, sr.Request.Type)
+}
+
+// OnFailureWatchError is why an on-failure step can't run the saved action
+// name: it watches for events.
+func OnFailureWatchError(name string) error {
+	return fmt.Errorf("saved action %q watches for events, which steps in \"If something goes wrong\" can't do", name)
 }
 
 func nameOr(name, fallback string) string {

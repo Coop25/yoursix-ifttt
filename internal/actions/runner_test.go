@@ -500,3 +500,17 @@ func TestSavedRequestAllActionsCoverWatch(t *testing.T) {
 		t.Fatal("secret in a watch action's parameters accepted")
 	}
 }
+
+func TestOnFailureWatchingSavedDelayFails(t *testing.T) {
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}, Stop: true})
+	subscribed := false
+	opts := RunOptions{InOnFailure: true, Watch: func(rules.Trigger) (<-chan yoursix.Event, func()) {
+		subscribed = true
+		return nil, func() {}
+	}}
+	res, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{}, opts)
+	want := `saved action "Wait" watches for events, which steps in "If something goes wrong" can't do`
+	if ok || subscribed || len(res) != 1 || res[0].Error != want {
+		t.Fatalf("ok=%v subscribed=%v res=%+v", ok, subscribed, res)
+	}
+}
