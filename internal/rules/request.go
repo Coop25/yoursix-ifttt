@@ -103,3 +103,31 @@ func (s SavedRequest) ResolveParams(given map[string]string) (map[string]string,
 	}
 	return out, nil
 }
+
+// AllActions is the saved action followed by the actions its watch runs, for
+// checks that apply to all of them (templates, secrets).
+func (s SavedRequest) AllActions() []Action {
+	out := []Action{s.Request}
+	if w := s.Request.Watch; w != nil {
+		out = append(append(out, w.Actions...), w.IfNoMatch...)
+	}
+	return out
+}
+
+// Relabel rewrites an ActionError about s.AllActions() that concerns one of
+// the watch's actions to name it, e.g. "watch action 1". Other errors are
+// returned as they are.
+func (s SavedRequest) Relabel(err error) error {
+	var ae *ActionError
+	w := s.Request.Watch
+	if !errors.As(err, &ae) || ae.Index < 1 || w == nil {
+		return err
+	}
+	if i := ae.Index - 1; i < len(w.Actions) {
+		return fmt.Errorf("watch action %d: %w", i+1, ae.Err)
+	}
+	if i := ae.Index - 1 - len(w.Actions); i < len(w.IfNoMatch) {
+		return fmt.Errorf("if-no-match action %d: %w", i+1, ae.Err)
+	}
+	return err
+}

@@ -453,3 +453,50 @@ func TestSavedDelayWatchRunsActions(t *testing.T) {
 		t.Fatalf("ok=%v hits=%d res=%+v", ok, hits.Load(), res)
 	}
 }
+
+// A saved wait whose watch actions use a secret belongs to its owner like any
+// other secret-using saved action: another owner's rule must not run it.
+func TestSavedDelayWatchSecretsOwnerOnly(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	for name, w := range map[string]*rules.Watch{
+		"on match": {Trigger: rules.Trigger{Codes: []string{"vmd"}},
+			Actions: []rules.Action{{Type: rules.ActionHTTP, Method: "GET", URL: srv.URL + `?k={{ secret "CAM_PASS" }}`}}},
+		"if no match": {Trigger: rules.Trigger{Codes: []string{"vmd"}},
+			IfNoMatch: []rules.Action{{Type: rules.ActionHTTP, Method: "GET", URL: srv.URL + `?k={{ secret "CAM_PASS" }}`}}},
+	} {
+		src := savedDelay(w)
+		sr := src[1]
+		sr.UpdatedBy, sr.UpdatedByName = "alice", "Alice"
+		src[1] = sr
+		secrets := func(string) (string, error) { return "bobs-secret", nil }
+		res, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}},
+			map[string]any{}, RunOptions{Owner: "bob", Secrets: secrets, Watch: oneEvent})
+		if ok || len(res) != 1 || !strings.Contains(res[0].Error, "only their rules") {
+			t.Errorf("%s: ok=%v res=%+v", name, ok, res)
+		}
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("watch action ran %d times for another owner", hits.Load())
+	}
+}
+
+func TestSavedRequestAllActionsCoverWatch(t *testing.T) {
+	sr := rules.SavedRequest{Request: rules.Action{Type: rules.ActionDelay, DelayMillis: 10, Watch: &rules.Watch{
+		Actions:   []rules.Action{{Type: rules.ActionHTTP, URL: `{{ secret "A" }}`}},
+		IfNoMatch: []rules.Action{{Type: rules.ActionDiscord, Message: `{{ secret "B" }}`}},
+	}}}
+	refs, err := SecretRefs(sr.AllActions())
+	if err != nil || strings.Join(refs, ",") != "A,B" {
+		t.Fatalf("refs %v err %v", refs, err)
+	}
+	sr.Request.Watch.Actions[0].URL = "{{ .bad"
+	if err := CheckTemplates(sr.AllActions()); err == nil {
+		t.Fatal("bad watch action template accepted")
+	}
+	sr.Request.Watch.Actions[0] = rules.Action{Type: rules.ActionRequest, RequestID: 2, Params: map[string]string{"p": `{{ secret "A" }}`}}
+	if err := ForbiddenSecretRefs(sr.AllActions()); err == nil {
+		t.Fatal("secret in a watch action's parameters accepted")
+	}
+}

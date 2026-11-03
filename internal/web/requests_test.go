@@ -239,3 +239,49 @@ func TestSavedActionRejectsNestedWatchingDelay(t *testing.T) {
 		t.Fatalf("rule: %d %s", code, body)
 	}
 }
+
+// savedWaitWithSecret is a saved wait whose if-no-match action sends CAM_PASS.
+func (ta *twoAdmins) savedWaitWithSecret() map[string]any {
+	return map[string]any{
+		"name": "Wait then call", "request": map[string]any{"type": "delay", "delayMillis": 5,
+			"watch": map[string]any{"trigger": map[string]any{"codes": []string{"vmd"}},
+				"ifNoMatch": []map[string]any{{"type": "http", "method": "GET", "auth": "basic", "username": "root",
+					"url": ta.target.URL + "/", "password": `{{ secret "CAM_PASS" }}`}}}},
+	}
+}
+
+func TestSavedWaitWatchActionSecretOwnership(t *testing.T) {
+	ta := newTwoAdmins(t)
+	ta.do(t, ta.alice, "PUT", "/api/secrets/CAM_PASS", map[string]string{"value": secretValue})
+
+	// Bob has no CAM_PASS, so he can't save a wait whose watch uses it.
+	if code, body := ta.do(t, ta.bob, "POST", "/api/requests", ta.savedWaitWithSecret()); code != 400 || !strings.Contains(body, "CAM_PASS") {
+		t.Fatalf("bob saving a wait with alice's secret: %d %s", code, body)
+	}
+	wait := ta.create(t, ta.alice, "/api/requests", ta.savedWaitWithSecret())
+
+	// Bob can't build a rule on Alice's wait: it would send her secret.
+	if code, body := ta.do(t, ta.bob, "POST", "/api/rules", ruleUsing("bob", wait, nil)); code != 400 || !strings.Contains(body, "only their rules") {
+		t.Fatalf("bob using alice's secret wait: %d %s", code, body)
+	}
+	// Alice can.
+	if code, body := ta.do(t, ta.alice, "POST", "/api/rules", ruleUsing("alice", wait, nil)); code != 201 {
+		t.Fatalf("alice using her wait: %d %s", code, body)
+	}
+	// The Secrets tab lists the wait as using CAM_PASS.
+	if _, body := ta.do(t, ta.alice, "GET", "/api/secrets", nil); !strings.Contains(body, "Saved action: Wait then call") {
+		t.Fatalf("secrets used-by misses the wait: %s", body)
+	}
+
+	// Secrets can't go into parameters of a saved action the watch calls.
+	shared := ta.create(t, ta.alice, "/api/requests", ta.savedRequest(false))
+	viaParams := map[string]any{
+		"name": "Wait then PTZ", "request": map[string]any{"type": "delay", "delayMillis": 5,
+			"watch": map[string]any{"trigger": map[string]any{"codes": []string{"vmd"}},
+				"actions": []map[string]any{{"type": "request", "requestId": shared,
+					"params": map[string]string{"preset": `{{ secret "CAM_PASS" }}`}}}}},
+	}
+	if code, body := ta.do(t, ta.alice, "POST", "/api/requests", viaParams); code != 400 || !strings.Contains(body, "watch action 1: parameter preset") {
+		t.Fatalf("secret in a watch action's parameters: %d %s", code, body)
+	}
+}

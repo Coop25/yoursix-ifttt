@@ -33,7 +33,7 @@ func (s *Server) checkRequestActions(r *http.Request, editorID string, acts []ru
 		if err != nil {
 			return err
 		}
-		refs, err := actions.SecretRefs([]rules.Action{sr.Request})
+		refs, err := actions.SecretRefs(sr.AllActions())
 		if err != nil {
 			return &rules.ActionError{Index: i, Err: err}
 		}
@@ -90,8 +90,8 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 // saving it (who becomes its owner), like rules.
 func (s *Server) requestEditor(w http.ResponseWriter, r *http.Request, sr rules.SavedRequest) (store.Editor, bool) {
 	u := userFrom(r.Context())
-	if err := s.secrets.CheckRule(r.Context(), u.ID, []rules.Action{sr.Request}); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := s.secrets.CheckRule(r.Context(), u.ID, sr.AllActions()); err != nil {
+		writeError(w, http.StatusBadRequest, sr.Relabel(err).Error())
 		return store.Editor{}, false
 	}
 	return editorFor(u), true

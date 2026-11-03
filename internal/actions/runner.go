@@ -684,7 +684,7 @@ func (r *Runner) resolveSaved(ctx context.Context, a rules.Action, data map[stri
 		res.Name = sr.Name
 	}
 	// Re-checked at run time, against the action as it is now.
-	refs, err := SecretRefs([]rules.Action{sr.Request})
+	refs, err := SecretRefs(sr.AllActions())
 	if err != nil {
 		return sr, nil, fmt.Errorf("saved action %q: %w", sr.Name, err)
 	}

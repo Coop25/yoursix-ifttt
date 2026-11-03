@@ -130,8 +130,8 @@ func prepareRequest(sr *rules.SavedRequest) (params, req []byte, err error) {
 	if err := sr.Validate(); err != nil {
 		return nil, nil, ValidationError{err}
 	}
-	if err := actions.CheckTemplates([]rules.Action{sr.Request}); err != nil {
-		return nil, nil, ValidationError{err}
+	if err := actions.CheckTemplates(sr.AllActions()); err != nil {
+		return nil, nil, ValidationError{sr.Relabel(err)}
 	}
 	if params, err = json.Marshal(sr.Params); err != nil {
 		return nil, nil, err

@@ -108,7 +108,7 @@ func (m *Manager) List(ctx context.Context, ownerID string) ([]store.SecretMeta,
 		if sr.UpdatedBy != ownerID {
 			continue
 		}
-		refs, err := actions.SecretRefs([]rules.Action{sr.Request})
+		refs, err := actions.SecretRefs(sr.AllActions())
 		if err != nil {
 			continue
 		}
