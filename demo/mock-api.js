@@ -401,7 +401,11 @@
       }
       return { ...f, value };
     });
-    const t = w.sameAsTrigger
+    // Like actions.watchedDelay: a saved action tested without a rule has no
+    // trigger to compare against, so nothing can match.
+    const nothing = w.sameAsTrigger && rule.noRule;
+    if (nothing) out.note = "nothing to compare against: this action is being tested without a rule";
+    const t = nothing ? { topics: [], codes: [], filters: [] } : w.sameAsTrigger
       ? { topics: rule.trigger.topics, codes: rule.trigger.codes, filters: [...(rule.trigger.filters || []), ...own] }
       : { topics: w.trigger?.topics || [], codes: w.trigger?.codes || [], filters: own };
     const queue = [];
@@ -413,7 +417,7 @@
       if (!(await runList(null, inner, acts, data, 0))) failed = true;
       out.steps = (out.steps || []).concat(inner.steps.map((s) => ({ ...s, match })));
     };
-    S.watchers.add(sub);
+    if (!nothing) S.watchers.add(sub);
     try {
       for (;;) {
         if (!queue.length) {
@@ -473,7 +477,15 @@
           for (const [k, v] of Object.entries(a.params || {})) if (v !== "") params[k] = render(v, data);
           const need = sr.params.find((p) => !p.default && !params[p.name]);
           if (need) throw new Error(`saved action "${sr.name}" needs a value for "${need.name}"`);
-          await runStep(sr.request, { ...data, params }, res);
+          if (sr.request.type === "delay" && sr.request.watch) {
+            // Watch actions can't run another watching delay (one at a time).
+            if (!rule) throw new Error(`saved action "${sr.name}" watches for events, so it can't run while another delay is watching`);
+            const { stop, failed } = await watchedDelay(e, run, sr.request, { ...data, params }, res, rule);
+            if (failed) ok = false;
+            if (stop) stopped = true;
+          } else {
+            await runStep(sr.request, { ...data, params }, res);
+          }
         } else {
           await runStep(a, data, res);
         }
@@ -616,7 +628,22 @@
     const a = body.request || {};
     if (!["http", "delay", "discord", undefined].includes(a.type)) return `a saved action can't be of type "${a.type}"`;
     // A saved delay may watch (the watch's "same events" means the using rule's trigger).
+    const nested = nestedWatch(a.watch);
+    if (nested) return nested;
     return validateRule({ name: "x", actions: [{ ...a, type: a.type || "http" }] }).replace(/^action 1: /, "");
+  }
+  // nestedWatch mirrors checkNestedWatch: a watch can't run a saved delay
+  // that itself watches.
+  function nestedWatch(w) {
+    for (const [label, list] of [["on-match", w?.actions || []], ["if-no-match", w?.ifNoMatch || []]]) {
+      for (const [i, a] of list.entries()) {
+        if (a.type !== "request") continue;
+        const sr = S.requests.find((x) => x.id === a.requestId);
+        if (!sr) return `watch: ${label} action ${i + 1}: saved action #${a.requestId} doesn't exist`;
+        if (sr.request.watch) return `watch: ${label} action ${i + 1}: saved action "${sr.name}" watches for events, so it can't run while another delay is watching`;
+      }
+    }
+    return "";
   }
   function validateRule(r) {
     if (!String(r.name || "").trim()) return "name is required";
@@ -624,6 +651,10 @@
     if (r.scheduleId && !S.schedules.some((s) => s.id === r.scheduleId)) return `schedule #${r.scheduleId} doesn't exist`;
     const bad = validateActions(r.actions, "action", true);
     if (bad) return bad;
+    for (const [i, a] of r.actions.entries()) {
+      const nested = a.type === "delay" && nestedWatch(a.watch);
+      if (nested) return `action ${i + 1}: ${nested}`;
+    }
     if (r.onFailure?.some((a) => a.watch)) return `on-failure action ${r.onFailure.findIndex((a) => a.watch) + 1}: only the rule's own delays can watch for events`;
     return validateActions(r.onFailure || [], "on-failure action", false);
   }
@@ -883,7 +914,7 @@
     ["POST", /^\/api\/requests\/(\d+)\/test$/, (m, body) => {
       const sr = S.requests.find((x) => x.id === +m[1]);
       if (!sr) return err(404, "not found");
-      const rule = { id: 0, name: `Saved action test: ${sr.name}`, actions: [{ type: "request", requestId: sr.id, params: body?.params || {} }] };
+      const rule = { id: 0, name: `Saved action test: ${sr.name}`, noRule: true, actions: [{ type: "request", requestId: sr.id, params: body?.params || {} }] };
       const ev = sample("device", "vmd");
       ev.eventId = "";
       const e = insertEvent(ev, { test: true, sourceIp: "test:demo" });
