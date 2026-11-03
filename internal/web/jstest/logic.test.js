@@ -87,3 +87,25 @@ test("tzLabel names common zones and passes others through", () => {
   assert.equal(fmtMinute(1440), "24:00");
   assert.equal(fmtMinute(9 * 60 + 5), "09:05");
 });
+
+test("splitSpan and joinSpan round-trip whole seconds", () => {
+  assert.deepEqual(splitSpan(5430000), { h: 1, m: 30, s: 30, exact: true });
+  assert.equal(joinSpan(1, 30, 30), 5430000);
+  assert.equal(joinSpan("", "5", ""), 300000);
+});
+test("splitSpan flags sub-second values", () => {
+  assert.deepEqual(splitSpan(1500), { h: 0, m: 0, s: 2, exact: false });
+});
+test("fmtSpan reads naturally", () => {
+  assert.equal(fmtSpan(45000), "45 s");
+  assert.equal(fmtSpan(300000), "5 m");
+  assert.equal(fmtSpan(5400000), "1 h 30 m");
+  assert.equal(fmtSpan(65000), "1 m 5 s");
+  assert.equal(fmtSpan(0), "0 s");
+  assert.equal(fmtSpan(1500), "1.5 s");
+});
+test("operator labels and value need", () => {
+  assert.equal(OP_LABELS.find(([v]) => v === "not_exists")[1], "doesn't exist");
+  assert.equal(opNeedsValue("exists"), false);
+  assert.equal(opNeedsValue("equals"), true);
+});

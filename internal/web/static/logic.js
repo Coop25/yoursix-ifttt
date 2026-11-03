@@ -130,11 +130,42 @@ function windowSummary(w) {
 }
 const scheduleText = (s) => (s.windows || []).map(windowSummary).join("; ");
 
+// ---------- durations and operator labels ----------
+// splitSpan breaks milliseconds into whole hours, minutes and seconds for the
+// h/m/s inputs; exact is false when the value has a sub-second part (s is
+// then rounded).
+function splitSpan(ms) {
+  const total = Math.round(ms / 1000);
+  return { h: Math.floor(total / 3600), m: Math.floor((total % 3600) / 60), s: total % 60, exact: ms % 1000 === 0 };
+}
+// joinSpan is the inverse: milliseconds from h/m/s values, where blanks and
+// NaN count as 0.
+function joinSpan(h, m, s) {
+  const n = (v) => Number(v) || 0;
+  return (n(h) * 3600 + n(m) * 60 + n(s)) * 1000;
+}
+// fmtSpan renders milliseconds as "1 h 30 m", omitting zero parts. Sub-second
+// values under a minute show one decimal of seconds ("1.5 s").
+function fmtSpan(ms) {
+  if (ms < 60000 && ms % 1000 !== 0) return `${Math.round(ms / 100) / 10} s`;
+  const { h, m, s } = splitSpan(ms);
+  const parts = [h && `${h} h`, m && `${m} m`, s && `${s} s`].filter(Boolean);
+  return parts.length ? parts.join(" ") : "0 s";
+}
+
+// OP_LABELS maps each filter operator to the words shown in the UI.
+const OP_LABELS = [
+  ["equals", "is"], ["not_equals", "is not"], ["contains", "contains"], ["starts_with", "starts with"],
+  ["exists", "exists"], ["not_exists", "doesn't exist"], ["regex", "matches pattern (advanced)"],
+];
+const opNeedsValue = (op) => op !== "exists" && op !== "not_exists";
+
 // Node (the JS tests) gets the helpers as a module; browsers get globals.
 if (typeof module !== "undefined") {
   module.exports = {
     VOLATILE_KEYS, contentOf, pretty, changedKeys, lineDiff,
     DAYS, DAY_KEYS, DEFAULT_TZ, COMMON_TZ, tzLabel, WEEK_MINUTES, hm, fmtMinute,
     coverage, scheduleCoverage, zonedMinute, scheduleActive, redundantWindows, windowSummary, scheduleText,
+    splitSpan, joinSpan, fmtSpan, OP_LABELS, opNeedsValue,
   };
 }
