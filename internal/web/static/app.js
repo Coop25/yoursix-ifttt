@@ -565,7 +565,7 @@ function fillVisual(r) {
   $("#f-name").value = r.name;
   $("#f-enabled").checked = r.enabled;
   showEnabled();
-  state.cooldownInput = durationInput({ ms: r.cooldownSeconds * 1000, maxMs: 0, label: "Cooldown" });
+  state.cooldownInput = durationInput({ ms: r.cooldownSeconds * 1000, label: "Cooldown" });
   $("#f-cooldown").replaceChildren(state.cooldownInput);
   $("#f-cooldown-from").value = r.cooldownFrom || "start";
   $("#f-skip-running").checked = !!r.skipIfRunning;
@@ -759,7 +759,7 @@ function comboBox({ value = "", placeholder = "", label, options }) {
   const items = () => $$("[role=option]", list);
   const setActive = (i) => {
     const all = items();
-    active = all.length ? (i + all.length) % all.length : -1;
+    active = i >= 0 && i < all.length ? i : -1;
     all.forEach((o, j) => o.setAttribute("aria-selected", String(j === active)));
     if (active >= 0) {
       input.setAttribute("aria-activedescendant", all[active].id);
@@ -795,7 +795,8 @@ function comboBox({ value = "", placeholder = "", label, options }) {
     }));
     list.classList.remove("hidden");
     input.setAttribute("aria-expanded", "true");
-    setActive(-1);
+    setActive(-1); // nothing chosen, so Enter keeps what's typed
+    list.scrollTop = 0;
   };
   input.addEventListener("focus", () => { dirty = false; open(); });
   input.addEventListener("click", () => { if (!isOpen()) open(); });
@@ -806,7 +807,7 @@ function comboBox({ value = "", placeholder = "", label, options }) {
       e.preventDefault();
       const down = e.key === "ArrowDown";
       if (!isOpen()) open();
-      setActive(active < 0 ? (down ? 0 : -1) : active + (down ? 1 : -1));
+      setActive(comboStep(active, items().length, down));
     } else if (e.key === "Enter" && isOpen() && active >= 0) {
       e.preventDefault(); // don't submit the form
       pick(items()[active].dataset.value);
@@ -837,7 +838,7 @@ function addFilterRow(f, container = $("#f-filters"), { watch = false, stats = (
     value: f.value || "", placeholder: "Value", label: "Value",
     options: (typed) => {
       const name = prop.value.trim(), low = typed.toLowerCase();
-      const out = watch && name && !typed ? [{ group: null, value: `{{ .data.${name} }}`, label: "Same as the event that started this rule" }] : [];
+      const out = watch && name && !typed ? [{ group: null, value: sameAsStartTemplate(name), label: "Same as the event that started this rule" }] : [];
       const seen = (stats()?.fields || []).find((x) => x.name === name);
       for (const v of seen?.values || []) if (v.value.toLowerCase().includes(low)) out.push({ group: null, value: v.value, label: `${v.value} · ${v.count}` });
       return out;
@@ -865,11 +866,10 @@ const field = (label, input) => [h("span.muted", {}, label), input];
 // read() gives milliseconds; a loaded value with a sub-second part is kept
 // as it was until a box is edited. set(ms) refills the boxes, and
 // disable(bool) greys them out.
-function durationInput({ ms = 0, maxMs, label }) {
+function durationInput({ ms = 0, label }) {
   const parts = [["h", "hours", 3600000], ["m", "minutes", 60000], ["s", "seconds", 1000]];
-  const boxes = parts.map(([k, name, unit]) => h("input.dur", {
+  const boxes = parts.map(([, name]) => h("input.dur", {
     type: "number", min: 0, step: 1, inputmode: "numeric", "aria-label": `${label} ${name}`,
-    max: maxMs && k === "h" ? Math.floor(maxMs / unit) : null,
   }));
   const note = h("span.muted.small.dur-note", {});
   const el = h("span.duration", {}, ...boxes.map((b, i) => [b, h("span.muted", {}, parts[i][0]), " "]), note);
@@ -929,7 +929,7 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false, open = fa
   } else if (a.type === "delay") {
     grid = h("div.action-grid", {},
       fixed ? null : field("Name", inp("name", { placeholder: "optional label" })),
-      field("Wait for", box._delay = durationInput({ ms: a.delayMillis ?? 0, maxMs: 600000, label: "Wait" })));
+      field("Wait for", box._delay = durationInput({ ms: a.delayMillis ?? 0, label: "Wait" })));
     // Only a rule's own delays and the saved action's delay can watch for
     // events. A watch anywhere else (typed in JSON) is kept as it is, so
     // saving explains why it's refused instead of quietly dropping it.
@@ -1072,7 +1072,7 @@ function watchSection(a, box, { saved = false } = {}) {
   const rowOpts = { watch: true, stats: () => fieldStats };
   (t.filters || []).forEach((f) => addFilterRow(f, filters, rowOpts));
   const restart = h("input", { type: "checkbox", class: "w-restart", checked: !!w.restart });
-  const maxDur = durationInput({ ms: w.maxMillis || 1800000, maxMs: 3600000, label: "Longest wait" });
+  const maxDur = durationInput({ ms: w.maxMillis || 1800000, label: "Longest wait" });
   const runActs = h("input", { type: "checkbox", class: "w-run", checked: !!w.actions?.length });
   const every = h("input", { type: "checkbox", class: "w-every", checked: !!w.everyMatch });
   const stop = h("input", { type: "checkbox", class: "w-stop", checked: !!w.stop });

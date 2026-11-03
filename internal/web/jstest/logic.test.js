@@ -149,3 +149,26 @@ test("stepErrorIndex finds the step a server error names", () => {
   assert.equal(stepErrorIndex("name is required"), null);
   assert.equal(stepErrorIndex(""), null);
 });
+
+test("comboStep moves through suggestions, wrapping only past the ends", () => {
+  assert.equal(comboStep(-1, 5, true), 0); // ArrowDown from none: first
+  assert.equal(comboStep(-1, 5, false), 4); // ArrowUp from none: last
+  assert.equal(comboStep(0, 5, true), 1);
+  assert.equal(comboStep(4, 5, true), 0);
+  assert.equal(comboStep(0, 5, false), 4);
+  assert.equal(comboStep(2, 5, false), 1);
+  assert.equal(comboStep(-1, 0, true), -1);
+  assert.equal(comboStep(3, 0, false), -1);
+});
+
+test("sameAsStartTemplate reads event-level properties from .event and others from .data", () => {
+  assert.equal(sameAsStartTemplate("deviceName"), "{{ .data.deviceName }}");
+  assert.equal(sameAsStartTemplate("data.deviceName"), "{{ .data.deviceName }}");
+  assert.equal(sameAsStartTemplate("eventCode"), "{{ .event.eventCode }}");
+  assert.equal(sameAsStartTemplate("eventTopic"), "{{ .event.eventTopic }}");
+  assert.equal(sameAsStartTemplate("eventDescription"), "{{ .event.eventDescription }}");
+  assert.equal(sameAsStartTemplate("eventId"), "{{ .event.eventId }}");
+  assert.equal(sameAsStartTemplate("device-name"), '{{ index .data "device-name" }}');
+  assert.equal(sameAsStartTemplate("2nd"), '{{ index .data "2nd" }}');
+  assert.equal(sameAsStartTemplate('a "b"'), '{{ index .data "a \\"b\\"" }}');
+});

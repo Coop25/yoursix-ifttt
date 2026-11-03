@@ -175,6 +175,27 @@ function fieldOptions(stats, typed) {
   return out;
 }
 
+// comboStep is the suggestion a combo box's arrow keys move to from active
+// (-1 = none) among count suggestions: down from none is the first, up from
+// none the last, and moving past either end wraps. -1 when there are none.
+function comboStep(active, count, down) {
+  if (count <= 0) return -1;
+  if (active < 0) return down ? 0 : count - 1;
+  return (active + (down ? 1 : -1) + count) % count;
+}
+
+// sameAsStartTemplate is the watch condition value meaning "the same as the
+// event that started this rule" for a property, as the server's
+// Event.Field reads it: event-level properties come from .event, others from
+// .data (a leading "data." names the same property), using index for names
+// a template can't write as .data.name.
+const EVENT_LEVEL_FIELDS = ["eventId", "eventOccurred", "eventCode", "eventTopic", "eventDescription"];
+function sameAsStartTemplate(field) {
+  if (EVENT_LEVEL_FIELDS.includes(field)) return `{{ .event.${field} }}`;
+  const name = field.startsWith("data.") ? field.slice(5) : field;
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? `{{ .data.${name} }}` : `{{ index .data ${JSON.stringify(name)} }}`;
+}
+
 // ---------- rule editor ----------
 // limitsSummary is the one-line summary of a rule's "Limits and schedule"
 // section, e.g. "Weeknights · at most once every 5 m · skips while running".
@@ -201,6 +222,6 @@ if (typeof module !== "undefined") {
     VOLATILE_KEYS, contentOf, pretty, changedKeys, lineDiff,
     DAYS, DAY_KEYS, DEFAULT_TZ, COMMON_TZ, tzLabel, WEEK_MINUTES, hm, fmtMinute,
     coverage, scheduleCoverage, zonedMinute, scheduleActive, redundantWindows, windowSummary, scheduleText,
-    splitSpan, joinSpan, fmtSpan, OP_LABELS, opNeedsValue, fieldOptions, limitsSummary, stepErrorIndex,
+    splitSpan, joinSpan, fmtSpan, OP_LABELS, opNeedsValue, fieldOptions, comboStep, sameAsStartTemplate, limitsSummary, stepErrorIndex,
   };
 }

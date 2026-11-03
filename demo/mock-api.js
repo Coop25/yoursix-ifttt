@@ -478,9 +478,14 @@
           const need = sr.params.find((p) => !p.default && !params[p.name]);
           if (need) throw new Error(`saved action "${sr.name}" needs a value for "${need.name}"`);
           if (sr.request.type === "delay" && sr.request.watch) {
-            // Watch actions can't run another watching delay (one at a time).
+            // On-failure steps can't watch, and watch actions can't run
+            // another watching delay (one at a time).
+            if (onFailure) throw new Error(onFailureWatchError(sr.name));
             if (!rule) throw new Error(`saved action "${sr.name}" watches for events, so it can't run while another delay is watching`);
-            const { stop, failed } = await watchedDelay(e, run, sr.request, { ...data, params }, res, rule);
+            const withParams = { ...data, params };
+            const { stop, failed } = await watchedDelay(e, run, sr.request, withParams, res, rule);
+            // Like the server, the rule's later steps see .watch too.
+            if ("watch" in withParams) data.watch = withParams.watch;
             if (failed) ok = false;
             if (stop) stopped = true;
           } else {
@@ -656,14 +661,23 @@
       if (nested) return `action ${i + 1}: ${nested}`;
     }
     if (r.onFailure?.some((a) => a.watch)) return `on-failure action ${r.onFailure.findIndex((a) => a.watch) + 1}: only the rule's own delays can watch for events`;
-    return validateActions(r.onFailure || [], "on-failure action", false);
+    const badOnFailure = validateActions(r.onFailure || [], "on-failure action", false);
+    if (badOnFailure) return badOnFailure;
+    // Like web.checkOnFailureWatch: on-failure steps can't watch.
+    for (const [i, a] of (r.onFailure || []).entries()) {
+      const sr = a.type === "request" && S.requests.find((x) => x.id === a.requestId);
+      if (sr?.request.watch) return `on-failure action ${i + 1}: ${onFailureWatchError(sr.name)}`;
+    }
+    return "";
   }
+  // onFailureWatchError mirrors actions.OnFailureWatchError.
+  const onFailureWatchError = (name) => `saved action "${name}" watches for events, which steps in "If something goes wrong" can't do`;
   function validateActions(list, label, watchable) {
     for (const [i, a] of list.entries()) {
       const at = `${label} ${i + 1}`;
       if (a.watch && a.type !== "delay") return `${at}: only delays can watch for events`;
       if (a.type === "http" && !a.url) return `${at}: url is required`;
-      if (a.type === "delay" && !(a.delayMillis > 0 && a.delayMillis <= 600000)) return `${at}: delayMillis must be between 1 and 600000`;
+      if (a.type === "delay" && !(a.delayMillis > 0 && a.delayMillis <= 600000)) return `${at}: a wait must be between 1 ms and 10 minutes`;
       if (a.type === "discord" && !a.message && !a.discord?.embeds?.length) return `${at}: a message or an embed is required`;
       if (a.type === "request") {
         const sr = S.requests.find((x) => x.id === a.requestId);
@@ -785,7 +799,8 @@
     ["GET", /^\/api\/me$/, () => json(200, { user: ME, version: "demo", devAuth: false })],
     ["GET", /^\/api\/catalog$/, () => json(200, { topics: Object.keys(CATALOG).sort(), codes: CATALOG })],
     ["GET", /^\/api\/catalog\/fields$/, (_, __, url) => {
-      const list = (k) => (url.searchParams.get(k) || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+      // Like the server, only the first 50 topics and codes are used.
+      const list = (k) => (url.searchParams.get(k) || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean).slice(0, 50);
       const topics = list("topics"), codes = list("codes");
       const acc = {};
       const add = (name, v) => {
