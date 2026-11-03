@@ -109,3 +109,26 @@ test("operator labels and value need", () => {
   assert.equal(opNeedsValue("exists"), false);
   assert.equal(opNeedsValue("equals"), true);
 });
+
+const stats = { fields: [{ name: "deviceName", seen: 412, values: [] }, { name: "groupName", seen: 30, values: [] }], known: ["siteName", "deviceId"] };
+test("fieldOptions groups seen fields before other known ones", () => {
+  assert.deepEqual(fieldOptions(stats, ""), [
+    { group: "Seen in your events", value: "deviceName", label: "deviceName · 412" },
+    { group: "Seen in your events", value: "groupName", label: "groupName · 30" },
+    { group: "Other known fields", value: "siteName", label: "siteName" },
+    { group: "Other known fields", value: "deviceId", label: "deviceId" },
+  ]);
+});
+test("fieldOptions filters case-insensitively and offers typed text", () => {
+  assert.deepEqual(fieldOptions(stats, "NAME").map((o) => o.value), ["NAME", "deviceName", "groupName", "siteName"]);
+  assert.deepEqual(fieldOptions(stats, "data.custom"), [{ group: null, value: "data.custom", label: "Use “data.custom”" }]);
+});
+test("fieldOptions has no Use entry for an exact match", () => {
+  assert.deepEqual(fieldOptions(stats, "deviceName").map((o) => o.value), ["deviceName"]);
+  assert.deepEqual(fieldOptions(stats, "siteName").map((o) => o.group), ["Other known fields"]);
+});
+test("fieldOptions with no stats lists only known fields", () => {
+  const got = fieldOptions({ fields: [], known: ["siteName"] }, "");
+  assert.deepEqual(got, [{ group: "Other known fields", value: "siteName", label: "siteName" }]);
+  assert.deepEqual(fieldOptions(null, ""), []);
+});

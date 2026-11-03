@@ -61,7 +61,7 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		topics = append(topics, t)
 	}
 	sort.Strings(topics)
-	writeJSON(w, http.StatusOK, map[string]any{"topics": topics, "codes": yoursix.Catalog, "fields": knownFields})
+	writeJSON(w, http.StatusOK, map[string]any{"topics": topics, "codes": yoursix.Catalog})
 }
 
 // handleCatalogFields suggests property names and values seen in recent

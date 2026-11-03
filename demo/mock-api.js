@@ -752,7 +752,7 @@
 
   const routes = [
     ["GET", /^\/api\/me$/, () => json(200, { user: ME, version: "demo", devAuth: false })],
-    ["GET", /^\/api\/catalog$/, () => json(200, { topics: Object.keys(CATALOG).sort(), codes: CATALOG, fields: FIELDS })],
+    ["GET", /^\/api\/catalog$/, () => json(200, { topics: Object.keys(CATALOG).sort(), codes: CATALOG })],
     ["GET", /^\/api\/catalog\/fields$/, (_, __, url) => {
       const list = (k) => (url.searchParams.get(k) || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
       const topics = list("topics"), codes = list("codes");

@@ -420,3 +420,14 @@ pre.diff > span { display: block; padding: 0 10px; white-space: pre-wrap; overfl
 .duration { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .duration input.dur { width: 64px; }
 .duration .dur-note:empty { display: none; }
+
+/* Condition rows: property and value boxes with a popup of suggestions. */
+.filter-row > * { min-width: 0; }
+.filter-row .ff-del { grid-column: 4; }
+.combo { position: relative; min-width: 0; }
+.combo > input { width: 100%; }
+.combo-list { position: absolute; z-index: 30; left: 0; right: 0; top: 100%; margin: 2px 0 0; padding: 4px 0; list-style: none; max-height: 240px; overflow-y: auto; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 6px 18px rgba(0, 0, 0, .25); }
+.combo-group { padding: 6px 10px 2px; font-size: 11.5px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+.combo-opt { padding: 7px 10px; cursor: pointer; overflow-wrap: anywhere; }
+.combo-opt:hover, .combo-opt[aria-selected=true] { background: var(--accent); color: var(--accent-text); }
+@media (max-width: 640px) { .filter-row .ff-del { grid-column: 1; justify-self: start; } }

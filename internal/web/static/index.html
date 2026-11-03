@@ -182,9 +182,10 @@
           <div><div class="field-label">Topics</div><div id="f-topics" class="picker"></div></div>
           <div><div class="field-label">Event codes</div><div id="f-codes" class="picker"></div></div>
         </div>
-        <div class="field-label">Filters <span class="muted small">(all must match; fields are eventData keys like deviceName, or eventCode etc.)</span></div>
+        <div class="field-label">Conditions <span class="muted small">(all must match; pick a property from recent events or type your own)</span></div>
         <div id="f-filters"></div>
-        <button type="button" class="btn small" id="add-filter">+ Filter</button>
+        <p id="f-filters-note" class="muted small hidden">Suggestions appear once events start arriving.</p>
+        <button type="button" class="btn small" id="add-filter">+ Add condition</button>
 
         <div class="then-head">
           <h3>Then…</h3>
@@ -317,22 +318,5 @@
     <footer class="dlg-foot"><button class="btn" id="result-close">Close</button></footer>
   </dialog>
 
-  <template id="tpl-filter">
-    <div class="filter-row">
-      <input class="ff-field" list="field-list" placeholder="deviceName">
-      <select class="ff-op">
-        <option value="equals">equals</option>
-        <option value="not_equals">not equals</option>
-        <option value="contains">contains</option>
-        <option value="starts_with">starts with</option>
-        <option value="regex">regex</option>
-        <option value="exists">exists</option>
-        <option value="not_exists">not exists</option>
-      </select>
-      <input class="ff-value" placeholder="value">
-      <button type="button" class="btn small danger ff-del">✕</button>
-    </div>
-  </template>
-  <datalist id="field-list"></datalist>
 </body>
 </html>

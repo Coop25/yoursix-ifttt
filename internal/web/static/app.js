@@ -87,7 +87,6 @@ async function boot() {
   $("#tabs").classList.remove("hidden");
 
   state.catalog = await api("GET", "/api/catalog");
-  $("#field-list").append(...state.catalog.fields.map((f) => h("option", { value: f })));
 
   $$("#tabs button").forEach((b) => b.addEventListener("click", () => {
     if (b.dataset.tab === "history" && state.historyScope) {
@@ -523,7 +522,12 @@ function fillVisual(r) {
   $("#f-cooldown-from").value = r.cooldownFrom || "start";
   $("#f-skip-running").checked = !!r.skipIfRunning;
 
-  ({ topics: state.topicPicker, codes: state.codePicker } = triggerPickers($("#f-topics"), $("#f-codes"), r.trigger));
+  state.fieldStats = null;
+  ({ topics: state.topicPicker, codes: state.codePicker } = triggerPickers($("#f-topics"), $("#f-codes"), r.trigger, (topics, codes) => {
+    loadFieldStats(topics, codes);
+    // Delays that watch "the same events as this rule" follow its pickers.
+    $$("#f-actions .action-box").forEach((b) => b.dispatchEvent(new CustomEvent("rulescope")));
+  }));
 
   $("#f-filters").replaceChildren();
   r.trigger.filters.forEach((flt) => addFilterRow(flt));
@@ -556,8 +560,8 @@ function showScheduleInfo() {
 
 // triggerPickers turns topicsEl and codesEl into a trigger's topic and
 // event code pickers, filled from trigger. The codes offered follow the
-// chosen topics.
-function triggerPickers(topicsEl, codesEl, trigger) {
+// chosen topics. onchange(topics, codes) runs after either picker changes.
+function triggerPickers(topicsEl, codesEl, trigger, onchange) {
   let topics = null; // set below; the code picker's options read it
   const codes = pillPicker(codesEl, {
     placeholder: "Add an event code…", empty: "Any event code", warnUnknown: true,
@@ -565,11 +569,15 @@ function triggerPickers(topicsEl, codesEl, trigger) {
       const picked = topics ? topics.values() : [];
       return (picked.length ? picked : state.catalog.topics).map((t) => [t, state.catalog.codes[t] || []]);
     },
+    onchange: () => onchange?.(topics.values(), codes.values()),
   });
   topics = pillPicker(topicsEl, {
     placeholder: "Add a topic…", empty: "Any topic",
     options: () => [[null, state.catalog.topics]],
-    onchange: () => codes.refresh(),
+    onchange: () => {
+      codes.refresh();
+      onchange?.(topics.values(), codes.values());
+    },
   });
   topics.set(trigger.topics || []);
   codes.set(trigger.codes || []);
@@ -630,12 +638,145 @@ function pillPicker(container, { placeholder, empty, options, onchange, warnUnkn
   return { values, refresh, set };
 }
 
-function addFilterRow(f, container = $("#f-filters")) {
-  const row = $("#tpl-filter").content.firstElementChild.cloneNode(true);
-  $(".ff-field", row).value = f.field || "";
-  $(".ff-op", row).value = f.op || "equals";
-  $(".ff-value", row).value = f.value || "";
-  $(".ff-del", row).addEventListener("click", () => row.remove());
+// ---------- condition rows ----------
+// fieldStatsLoader returns load(topics, codes, now), which fetches the
+// property and value suggestions for those topics and codes (debounced
+// 300 ms unless now) and passes the response to apply. A stale response is
+// dropped.
+function fieldStatsLoader(apply) {
+  let timer = 0, seq = 0;
+  return (topics, codes, now = false) => {
+    clearTimeout(timer);
+    const run = async () => {
+      const n = ++seq;
+      const q = new URLSearchParams({ topics: topics.join(","), codes: codes.join(",") });
+      try {
+        const data = await api("GET", `/api/catalog/fields?${q}`);
+        if (n === seq) apply(data);
+      } catch { /* suggestions are optional */ }
+    };
+    if (now) run();
+    else timer = setTimeout(run, 300);
+  };
+}
+const NO_SUGGESTIONS = "Suggestions appear once events start arriving.";
+// loadFieldStats refreshes state.fieldStats, the rule's own conditions' suggestions.
+const loadFieldStats = fieldStatsLoader((data) => {
+  state.fieldStats = data;
+  $("#f-filters-note").classList.toggle("hidden", !!data.fields.length);
+});
+
+let comboSeq = 0;
+// comboBox is a text box with a popup list of suggestions; any text can be
+// typed. options(typed) returns [{group, value, label}] (group may be null).
+// typed is "" until the user edits the text, so an existing value doesn't
+// hide the other choices. The element's .value is the text, and it fires a
+// bubbling "change" when a suggestion is picked or the text is committed.
+function comboBox({ value = "", placeholder = "", label, options }) {
+  const id = `combo-${++comboSeq}`;
+  const input = h("input", {
+    type: "text", role: "combobox", autocomplete: "off", spellcheck: "false", placeholder, "aria-label": label,
+    "aria-autocomplete": "list", "aria-expanded": "false", "aria-controls": id,
+  });
+  const list = h("ul.combo-list.hidden", { id, role: "listbox", "aria-label": label });
+  const el = h("div.combo", {}, input, list);
+  input.value = value;
+  let dirty = false, active = -1;
+  const isOpen = () => !list.classList.contains("hidden");
+  const items = () => $$("[role=option]", list);
+  const setActive = (i) => {
+    const all = items();
+    active = all.length ? (i + all.length) % all.length : -1;
+    all.forEach((o, j) => o.setAttribute("aria-selected", String(j === active)));
+    if (active >= 0) {
+      input.setAttribute("aria-activedescendant", all[active].id);
+      all[active].scrollIntoView({ block: "nearest" });
+    } else input.removeAttribute("aria-activedescendant");
+  };
+  const close = () => {
+    list.classList.add("hidden");
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    active = -1;
+  };
+  const pick = (v) => {
+    input.value = v;
+    dirty = false;
+    close();
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const open = () => {
+    const opts = options(dirty ? input.value : "");
+    if (!opts.length) return close();
+    let group = null;
+    list.replaceChildren(...opts.flatMap((o, i) => {
+      const out = [];
+      if (o.group && o.group !== group) out.push(h("li.combo-group", { role: "presentation" }, o.group));
+      group = o.group;
+      const opt = h("li.combo-opt", {
+        role: "option", id: `${id}-${i}`, "aria-selected": "false",
+        onmousedown: (e) => { e.preventDefault(); pick(o.value); }, // before the input loses focus
+      }, o.label);
+      opt.dataset.value = o.value;
+      return [...out, opt];
+    }));
+    list.classList.remove("hidden");
+    input.setAttribute("aria-expanded", "true");
+    setActive(-1);
+  };
+  input.addEventListener("focus", () => { dirty = false; open(); });
+  input.addEventListener("click", () => { if (!isOpen()) open(); });
+  input.addEventListener("input", () => { dirty = true; open(); });
+  input.addEventListener("blur", close);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const down = e.key === "ArrowDown";
+      if (!isOpen()) open();
+      setActive(active < 0 ? (down ? 0 : -1) : active + (down ? 1 : -1));
+    } else if (e.key === "Enter" && isOpen() && active >= 0) {
+      e.preventDefault(); // don't submit the form
+      pick(items()[active].dataset.value);
+    } else if (e.key === "Escape" && isOpen()) {
+      e.preventDefault();
+      e.stopPropagation(); // close the list, not the dialog
+      close();
+    }
+  });
+  // Typed text commits on blur via the input's own change event, which
+  // bubbles to el like a picked suggestion's does.
+  Object.defineProperty(el, "value", { get: () => input.value, set: (v) => { input.value = v; } });
+  return el;
+}
+
+// addFilterRow adds a condition row to container. Suggestions come from
+// stats(), the /api/catalog/fields response or null. In a watch, values can
+// also refer to the event that started the run.
+function addFilterRow(f, container = $("#f-filters"), { watch = false, stats = () => state.fieldStats } = {}) {
+  const prop = comboBox({
+    value: f.field || "", placeholder: "Property, e.g. deviceName", label: "Property",
+    options: (typed) => fieldOptions(stats(), typed),
+  });
+  const op = h("select.ff-op", { "aria-label": "Condition" }, OP_LABELS.map(([v, text]) => h("option", { value: v }, text)));
+  if (f.op && !OP_LABELS.some(([v]) => v === f.op)) op.append(h("option", { value: f.op }, f.op));
+  op.value = f.op || "equals";
+  const val = comboBox({
+    value: f.value || "", placeholder: "Value", label: "Value",
+    options: (typed) => {
+      const name = prop.value.trim(), low = typed.toLowerCase();
+      const out = watch && name && !typed ? [{ group: null, value: `{{ .data.${name} }}`, label: "Same as the event that started this rule" }] : [];
+      const seen = (stats()?.fields || []).find((x) => x.name === name);
+      for (const v of seen?.values || []) if (v.value.toLowerCase().includes(low)) out.push({ group: null, value: v.value, label: `${v.value} · ${v.count}` });
+      return out;
+    },
+  });
+  prop.classList.add("ff-field");
+  val.classList.add("ff-value");
+  const sync = () => val.classList.toggle("hidden", !opNeedsValue(op.value));
+  op.addEventListener("change", sync);
+  sync();
+  const row = h("div.filter-row", {}, prop, op, val,
+    h("button.btn.small.danger.ff-del", { type: "button", "aria-label": "Remove condition", onclick: () => row.remove() }, "✕"));
   container.append(row);
 }
 
@@ -747,10 +888,23 @@ function watchSection(a, box) {
   const on = h("input", { type: "checkbox", class: "w-on", checked: !!a.watch });
   const same = h("input", { type: "checkbox", class: "w-same", checked: !!w.sameAsTrigger });
   const topics = h("div.picker"), codes = h("div.picker");
-  const { topics: topicPicker, codes: codePicker } = triggerPickers(topics, codes, t);
-  const own = h("div.w-own", {}, field("Topics", topics), field("Event codes", codes));
+  // Suggestions for this watch's conditions follow the events it watches.
+  let fieldStats = null;
+  const note = h("p.muted.small.hidden", {}, NO_SUGGESTIONS);
+  const loadStats = fieldStatsLoader((data) => {
+    fieldStats = data;
+    note.classList.toggle("hidden", !!data.fields.length);
+  });
+  let own = [[], []]; // the watch's own topics and codes
+  const refreshStats = () => { if (on.checked) loadStats(...(same.checked ? [selectedTopics(), readCodes()] : own)); };
+  const { topics: topicPicker, codes: codePicker } = triggerPickers(topics, codes, t, (tp, cp) => {
+    own = [tp, cp];
+    refreshStats();
+  });
+  const ownBox = h("div.w-own", {}, field("Topics", topics), field("Event codes", codes));
   const filters = h("div.w-filters");
-  (t.filters || []).forEach((f) => addFilterRow(f, filters));
+  const rowOpts = { watch: true, stats: () => fieldStats };
+  (t.filters || []).forEach((f) => addFilterRow(f, filters, rowOpts));
   const restart = h("input", { type: "checkbox", class: "w-restart", checked: !!w.restart });
   const maxDur = durationInput({ ms: w.maxMillis || 1800000, maxMs: 3600000, label: "Longest wait" });
   const runActs = h("input", { type: "checkbox", class: "w-run", checked: !!w.actions?.length });
@@ -766,10 +920,11 @@ function watchSection(a, box) {
 
   const body = h("div.watch-body", {},
     h("label.inline", {}, same, "Same events as this rule's trigger"),
-    own,
+    ownBox,
     h("div.w-label", {}, "Filters ", h("span.muted.small", {}, "Values can use the event that started the run, e.g. deviceName equals ", h("code", {}, "{{ .data.deviceName }}"), " for the same camera.")),
     filters,
-    h("div.row", {}, h("button.btn.small", { type: "button", onclick: () => addFilterRow({ field: "deviceName", op: "equals", value: "{{ .data.deviceName }}" }, filters) }, "+ Filter")),
+    h("div.row", {}, h("button.btn.small", { type: "button", onclick: () => addFilterRow({ field: "deviceName", op: "equals", value: "{{ .data.deviceName }}" }, filters, rowOpts) }, "+ Add condition")),
+    note,
     h("div.w-label", {}, "When one arrives"),
     h("label.inline", {}, restart, "Keep waiting up to ", maxDur, " in total"),
     h("label.inline", {}, runActs, "Run actions"),
@@ -781,11 +936,13 @@ function watchSection(a, box) {
       h("code", {}, "{{ .watch.data.deviceName }}"), " (the matched event) and more; so do the rule's later steps."));
   const sync = () => {
     body.classList.toggle("hidden", !on.checked);
-    own.classList.toggle("hidden", same.checked);
+    ownBox.classList.toggle("hidden", same.checked);
     maxDur.disable(!restart.checked);
     actsBlock.classList.toggle("hidden", !runActs.checked);
+    refreshStats();
   };
   for (const el of [on, same, restart, runActs]) el.addEventListener("change", sync);
+  box.addEventListener("rulescope", () => { if (same.checked) refreshStats(); });
   sync();
 
   box._readWatch = () => {

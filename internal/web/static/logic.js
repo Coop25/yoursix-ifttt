@@ -160,12 +160,27 @@ const OP_LABELS = [
 ];
 const opNeedsValue = (op) => op !== "exists" && op !== "not_exists";
 
+// fieldOptions is the property suggestions for a condition row, from the
+// /api/catalog/fields response: [{group, value, label}]. typed filters them
+// (case-insensitive substring); unless it exactly names a property, a
+// leading ungrouped entry offers it as typed.
+function fieldOptions(stats, typed) {
+  const t = (typed || "").trim(), low = t.toLowerCase();
+  const fields = stats?.fields || [], known = stats?.known || [];
+  const hit = (name) => name.toLowerCase().includes(low);
+  const out = [];
+  if (t && ![...fields.map((f) => f.name), ...known].includes(t)) out.push({ group: null, value: t, label: `Use “${t}”` });
+  for (const f of fields) if (hit(f.name)) out.push({ group: "Seen in your events", value: f.name, label: `${f.name} · ${f.seen}` });
+  for (const k of known) if (hit(k)) out.push({ group: "Other known fields", value: k, label: k });
+  return out;
+}
+
 // Node (the JS tests) gets the helpers as a module; browsers get globals.
 if (typeof module !== "undefined") {
   module.exports = {
     VOLATILE_KEYS, contentOf, pretty, changedKeys, lineDiff,
     DAYS, DAY_KEYS, DEFAULT_TZ, COMMON_TZ, tzLabel, WEEK_MINUTES, hm, fmtMinute,
     coverage, scheduleCoverage, zonedMinute, scheduleActive, redundantWindows, windowSummary, scheduleText,
-    splitSpan, joinSpan, fmtSpan, OP_LABELS, opNeedsValue,
+    splitSpan, joinSpan, fmtSpan, OP_LABELS, opNeedsValue, fieldOptions,
   };
 }
