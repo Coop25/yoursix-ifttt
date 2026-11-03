@@ -348,3 +348,40 @@ func TestWatchProgressThrottled(t *testing.T) {
 		t.Fatalf("%d saves, want 2", got)
 	}
 }
+
+// A delay saved as a request watches for events just like an inline one,
+// so a matching event mid-wait restarts the countdown.
+func TestSavedDelayWatchRestartsInEngine(t *testing.T) {
+	h := newHarness(t)
+	rec := newRecorder(t)
+	saved, err := h.st.CreateRequest(context.Background(), rules.SavedRequest{
+		Name: "Lights off after motion",
+		Request: rules.Action{Type: rules.ActionDelay, DelayMillis: 400,
+			Watch: &rules.Watch{SameAsTrigger: true, Restart: true, MaxMillis: 800}},
+	}, store.Editor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := h.create(rules.Rule{SkipIfRunning: true, Trigger: rules.Trigger{Codes: []string{"vmd"}},
+		Actions: []rules.Action{
+			{Type: rules.ActionRequest, RequestID: saved.ID},
+			{Type: rules.ActionHTTP, URL: rec.url + "/?msg=done"},
+		}})
+
+	start := time.Now()
+	row := h.send(yoursix.Sample("device", "vmd"))
+	h.watching(1)
+	time.Sleep(200 * time.Millisecond)
+	h.send(yoursix.Sample("device", "vmd"))
+	run := h.run(row, r.ID)
+	if took := time.Since(start); took < 550*time.Millisecond {
+		t.Fatalf("run took %s; the countdown wasn't restarted", took)
+	}
+	w := run.Steps[0].Watch
+	if run.Status != store.RunOK || w == nil || w.Matches != 1 || w.Restarts != 1 {
+		t.Fatalf("run: %+v watch: %+v", run, w)
+	}
+	if got := rec.got(); len(got) != 1 || got[0] != "done" {
+		t.Fatalf("target got %q", got)
+	}
+}
