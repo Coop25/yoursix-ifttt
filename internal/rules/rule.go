@@ -406,7 +406,7 @@ func (a *Action) validate() error {
 		}
 	case ActionDelay:
 		if a.DelayMillis <= 0 || a.DelayMillis > 10*60*1000 {
-			return errors.New("delayMillis must be between 1 and 600000")
+			return errors.New("a wait must be between 1 ms and 10 minutes")
 		}
 		if a.Watch != nil {
 			if err := a.Watch.validate(a.DelayMillis); err != nil {

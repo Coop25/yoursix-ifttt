@@ -71,3 +71,16 @@ func TestValidate(t *testing.T) {
 		t.Fatalf("not normalised: %+v", ok)
 	}
 }
+
+func TestDelayLimitsInPlainUnits(t *testing.T) {
+	for _, ms := range []int{0, -5, 10*60*1000 + 1} {
+		r := Rule{Name: "x", Actions: []Action{{Type: ActionDelay, DelayMillis: ms}}}
+		if err := r.Validate(); err == nil || err.Error() != "action 1: a wait must be between 1 ms and 10 minutes" {
+			t.Errorf("%d ms: %v", ms, err)
+		}
+	}
+	r := Rule{Name: "x", Actions: []Action{{Type: ActionDelay, DelayMillis: 10 * 60 * 1000}}}
+	if err := r.Validate(); err != nil {
+		t.Errorf("10 minutes: %v", err)
+	}
+}
