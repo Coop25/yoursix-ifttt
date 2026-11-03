@@ -132,3 +132,20 @@ test("fieldOptions with no stats lists only known fields", () => {
   assert.deepEqual(got, [{ group: "Other known fields", value: "siteName", label: "siteName" }]);
   assert.deepEqual(fieldOptions(null, ""), []);
 });
+
+test("limitsSummary describes the schedule, cooldown and overlap setting", () => {
+  assert.equal(limitsSummary({ scheduleName: "", cooldownSeconds: 0, cooldownFrom: "start", skipIfRunning: false }), "Any time · no limit");
+  assert.equal(limitsSummary({ scheduleName: "Weeknights", cooldownSeconds: 300, cooldownFrom: "start", skipIfRunning: true }),
+    "Weeknights · at most once every 5 m · skips while running");
+  assert.equal(limitsSummary({ scheduleName: "", cooldownSeconds: 90, cooldownFrom: "finish", skipIfRunning: false }),
+    "Any time · at most once every 1 m 30 s after the last run finishes");
+  assert.equal(limitsSummary({ scheduleName: "Business hours", cooldownSeconds: 0, cooldownFrom: "start", skipIfRunning: true }),
+    "Business hours · skips while running");
+});
+test("stepErrorIndex finds the step a server error names", () => {
+  assert.deepEqual(stepErrorIndex("action 3: url is required"), { list: "actions", index: 2 });
+  assert.deepEqual(stepErrorIndex("on-failure action 1: x"), { list: "onFailure", index: 0 });
+  assert.deepEqual(stepErrorIndex("action 2, watch action 1: url is required"), { list: "actions", index: 1 });
+  assert.equal(stepErrorIndex("name is required"), null);
+  assert.equal(stepErrorIndex(""), null);
+});

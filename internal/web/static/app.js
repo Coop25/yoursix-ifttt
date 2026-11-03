@@ -421,9 +421,28 @@ function cleanRule(r) {
 function wireEditor() {
   guardEditor("rule", $("#editor"), $("#editor-cancel"), editorState);
   $("#add-filter").addEventListener("click", () => addFilterRow({ field: "deviceName", op: "equals", value: "" }));
-  $$("[data-add-action]").forEach((b) => b.addEventListener("click", () => { addActionBox(blankAction(b.dataset.addAction)); schedulePreview(); }));
-  $$("[data-add-fail]").forEach((b) => b.addEventListener("click", () => { addActionBox(blankAction(b.dataset.addFail), $("#f-onfail")); schedulePreview(); }));
+  $("#f-filters-note").textContent = NO_SUGGESTIONS;
+  const addStep = (type, list) => { addActionBox(blankAction(type), list, { open: true }); schedulePreview(); };
+  $$("[data-add-action]").forEach((b) => b.addEventListener("click", () => addStep(b.dataset.addAction, $("#f-actions"))));
+  $$("[data-add-fail]").forEach((b) => b.addEventListener("click", () => addStep(b.dataset.addFail, $("#f-onfail"))));
   $("#f-schedule").addEventListener("change", showScheduleInfo);
+  $("#f-enabled").addEventListener("change", showEnabled);
+  // The folded sections' summaries follow what's in them.
+  $("#f-onfail").addEventListener("stepschange", showOnFailCount);
+  for (const type of ["input", "change"]) $("#f-limits-fold").addEventListener(type, showLimits);
+  // The "⋯" and "+ Add step" menus close after a pick, on Esc (without
+  // closing the editor) and on a click elsewhere.
+  for (const menu of $$("#editor details.menu")) {
+    menu.addEventListener("click", (e) => { if (e.target.closest(".menu-item")) menu.open = false; });
+    menu.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !menu.open) return;
+      e.preventDefault();
+      e.stopPropagation();
+      menu.open = false;
+      $("summary", menu).focus();
+    });
+  }
+  $("#editor").addEventListener("click", (e) => $$("#editor details.menu[open]").forEach((m) => { if (!m.contains(e.target)) m.open = false; }));
   wirePreview();
   $("#editor-json-mode").addEventListener("change", (e) => {
     const err = $("#editor-error");
@@ -434,8 +453,8 @@ function wireEditor() {
       } else {
         fillVisual(cleanRule(JSON.parse($("#f-json").value)));
       }
-      $("#editor-visual").classList.toggle("hidden", e.target.checked);
-      $("#editor-json").classList.toggle("hidden", !e.target.checked);
+      showEditorMode(e.target.checked);
+      $("#editor-menu").open = false;
     } catch (ex) {
       e.target.checked = !e.target.checked;
       err.textContent = "Invalid JSON: " + ex.message;
@@ -466,20 +485,44 @@ function wireEditor() {
             reload: () => {
               state.editing = ex.data.current;
               $("#editor-json-mode").checked = false;
-              $("#editor-visual").classList.remove("hidden");
-              $("#editor-json").classList.add("hidden");
+              showEditorMode(false);
               fillVisual(cleanRule(structuredClone(ex.data.current)));
               guards.rule.snapshot();
               err.replaceChildren();
             },
           });
-        } else err.textContent = ex.message;
+        } else {
+          err.textContent = ex.message;
+          if (!$("#editor-json-mode").checked) revealStep(stepErrorIndex(ex.message));
+        }
       }
     };
     // Saving sends the version this editor opened, so the server can refuse
     // if someone else saved in between.
     save(state.editing?.updatedAt);
   });
+}
+
+// showEditorMode switches the rule editor between the form and its JSON.
+// The name and On/Off switch are part of the form, so JSON mode hides them.
+function showEditorMode(json) {
+  $("#editor-visual").classList.toggle("hidden", json);
+  $("#editor-basics").classList.toggle("hidden", json);
+  $("#editor-json").classList.toggle("hidden", !json);
+}
+
+// revealStep expands the step a save error is about (from stepErrorIndex),
+// unfolding its section, and scrolls it into view.
+function revealStep(at) {
+  if (!at) return;
+  const list = at.list === "onFailure" ? $("#f-onfail") : $("#f-actions");
+  const box = $$(":scope > .action-box", list)[at.index];
+  if (!box) return;
+  const fold = list.closest("details");
+  if (fold) fold.open = true;
+  setStepOpen(box, true);
+  box.classList.add("has-error");
+  box.scrollIntoView({ block: "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
 }
 
 // showConflict explains that someone else saved the item after this editor
@@ -507,8 +550,8 @@ async function openEditor(rule) {
   $("#editor-title").textContent = rule ? `Edit: ${rule.name}` : "New rule";
   $("#editor-error").textContent = "";
   $("#editor-json-mode").checked = false;
-  $("#editor-visual").classList.remove("hidden");
-  $("#editor-json").classList.add("hidden");
+  showEditorMode(false);
+  $("#editor-menu").open = false;
   fillVisual(cleanRule(rule ? structuredClone(rule) : blankRule()));
   $("#editor").showModal();
   guards.rule.snapshot();
@@ -517,16 +560,18 @@ async function openEditor(rule) {
 function fillVisual(r) {
   $("#f-name").value = r.name;
   $("#f-enabled").checked = r.enabled;
+  showEnabled();
   state.cooldownInput = durationInput({ ms: r.cooldownSeconds * 1000, maxMs: 0, label: "Cooldown" });
   $("#f-cooldown").replaceChildren(state.cooldownInput);
   $("#f-cooldown-from").value = r.cooldownFrom || "start";
   $("#f-skip-running").checked = !!r.skipIfRunning;
 
   state.fieldStats = null;
+  $("#f-filters-note").classList.add("hidden");
   ({ topics: state.topicPicker, codes: state.codePicker } = triggerPickers($("#f-topics"), $("#f-codes"), r.trigger, (topics, codes) => {
     loadFieldStats(topics, codes);
     // Delays that watch "the same events as this rule" follow its pickers.
-    $$("#f-actions .action-box").forEach((b) => b.dispatchEvent(new CustomEvent("rulescope")));
+    $$("#f-actions .action-box, #f-onfail .action-box").forEach((b) => b.dispatchEvent(new CustomEvent("rulescope")));
   }));
 
   $("#f-filters").replaceChildren();
@@ -543,7 +588,29 @@ function fillVisual(r) {
     ...(r.scheduleId && !known.some((s) => s.id === r.scheduleId) ? [h("option", { value: r.scheduleId }, `#${r.scheduleId} (missing)`)] : []));
   sel.value = r.scheduleId ? String(r.scheduleId) : "";
   showScheduleInfo();
+  // Steps start collapsed (addActionBox's default) and the extra sections folded.
+  $("#f-onfail-fold").open = false;
+  $("#f-limits-fold").open = false;
+  showOnFailCount();
+  showLimits();
   schedulePreview();
+}
+
+const showEnabled = () => { $("#f-enabled-text").textContent = $("#f-enabled").checked ? "On" : "Off"; };
+
+function showOnFailCount() {
+  const n = $$("#f-onfail > .action-box").length;
+  $("#f-onfail-count").textContent = n ? `· ${n} step${n === 1 ? "" : "s"}` : "· none";
+}
+
+function showLimits() {
+  const sel = $("#f-schedule");
+  $("#f-limits-summary").textContent = "· " + limitsSummary({
+    scheduleName: sel.value ? sel.selectedOptions[0]?.textContent : "",
+    cooldownSeconds: state.cooldownInput ? state.cooldownInput.read() / 1000 : 0,
+    cooldownFrom: $("#f-cooldown-from").value,
+    skipIfRunning: $("#f-skip-running").checked,
+  });
 }
 
 // showScheduleInfo describes the schedule picked in the rule editor.
@@ -564,7 +631,7 @@ function showScheduleInfo() {
 function triggerPickers(topicsEl, codesEl, trigger, onchange) {
   let topics = null; // set below; the code picker's options read it
   const codes = pillPicker(codesEl, {
-    placeholder: "Add an event code…", empty: "Any event code", warnUnknown: true,
+    placeholder: "Add an event code…", empty: "Any event", warnUnknown: true,
     options: () => {
       const picked = topics ? topics.values() : [];
       return (picked.length ? picked : state.catalog.topics).map((t) => [t, state.catalog.codes[t] || []]);
@@ -572,7 +639,7 @@ function triggerPickers(topicsEl, codesEl, trigger, onchange) {
     onchange: () => onchange?.(topics.values(), codes.values()),
   });
   topics = pillPicker(topicsEl, {
-    placeholder: "Add a topic…", empty: "Any topic",
+    placeholder: "Add a topic…", empty: "Any event",
     options: () => [[null, state.catalog.topics]],
     onchange: () => {
       codes.refresh();
@@ -641,19 +708,20 @@ function pillPicker(container, { placeholder, empty, options, onchange, warnUnkn
 // ---------- condition rows ----------
 // fieldStatsLoader returns load(topics, codes, now), which fetches the
 // property and value suggestions for those topics and codes (debounced
-// 300 ms unless now) and passes the response to apply. A stale response is
-// dropped.
+// 300 ms unless now) and passes the response, or null if it failed, to
+// apply. A stale response is dropped.
 function fieldStatsLoader(apply) {
   let timer = 0, seq = 0;
   return (topics, codes, now = false) => {
     clearTimeout(timer);
+    // Counted when scheduled, so a response for earlier topics (or an
+    // earlier editor) that arrives after this call is ignored.
+    const n = ++seq;
     const run = async () => {
-      const n = ++seq;
       const q = new URLSearchParams({ topics: topics.join(","), codes: codes.join(",") });
-      try {
-        const data = await api("GET", `/api/catalog/fields?${q}`);
-        if (n === seq) apply(data);
-      } catch { /* suggestions are optional */ }
+      let data = null; // suggestions are optional: on an error, offer none
+      try { data = await api("GET", `/api/catalog/fields?${q}`); } catch { /* keep null */ }
+      if (n === seq) apply(data);
     };
     if (now) run();
     else timer = setTimeout(run, 300);
@@ -663,7 +731,7 @@ const NO_SUGGESTIONS = "Suggestions appear once events start arriving.";
 // loadFieldStats refreshes state.fieldStats, the rule's own conditions' suggestions.
 const loadFieldStats = fieldStatsLoader((data) => {
   state.fieldStats = data;
-  $("#f-filters-note").classList.toggle("hidden", !!data.fields.length);
+  $("#f-filters-note").classList.toggle("hidden", !data || !!data.fields.length);
 });
 
 let comboSeq = 0;
@@ -678,7 +746,8 @@ function comboBox({ value = "", placeholder = "", label, options }) {
     type: "text", role: "combobox", autocomplete: "off", spellcheck: "false", placeholder, "aria-label": label,
     "aria-autocomplete": "list", "aria-expanded": "false", "aria-controls": id,
   });
-  const list = h("ul.combo-list.hidden", { id, role: "listbox", "aria-label": label });
+  // Pressing on the list (its scrollbar, a group heading) mustn't blur the input and close it.
+  const list = h("ul.combo-list.hidden", { id, role: "listbox", "aria-label": label, onmousedown: (e) => e.preventDefault() });
   const el = h("div.combo", {}, input, list);
   input.value = value;
   let dirty = false, active = -1;
@@ -818,17 +887,15 @@ function durationInput({ ms = 0, maxMs, label }) {
 const ACTION_LABELS = { http: "HTTP request", delay: "Wait", discord: "Discord message", request: "Saved action" };
 
 // addActionBox renders an action's form into container (the rule editor's
-// action list by default). With fixed, it's the single action in the saved
-// action editor: no header, reorder/remove buttons, name or continue-on-error.
-function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
+// action list by default) as a step card: a header with the step's number,
+// a one-line summary that opens and closes the form, and move, duplicate
+// and remove buttons. It starts collapsed unless open. With fixed, it's the
+// single action in the saved action editor: no header, name or
+// continue-on-error, always shown.
+function addActionBox(a, container = $("#f-actions"), { fixed = false, open = false } = {}) {
   const box = h("div.action-box" + (fixed ? ".fixed" : ""), {});
   box.dataset.type = a.type;
-  const head = fixed ? null : h("div.action-head", {},
-    h("strong", {}, ACTION_LABELS[a.type] || a.type),
-    h("button.btn.small", { type: "button", "aria-label": "Move up", onclick: () => box.previousElementSibling && box.parentNode.insertBefore(box, box.previousElementSibling) }, "↑"),
-    h("button.btn.small", { type: "button", "aria-label": "Move down", onclick: () => box.nextElementSibling && box.parentNode.insertBefore(box.nextElementSibling, box) }, "↓"),
-    h("button.btn.small.danger", { type: "button", "aria-label": "Remove action", onclick: () => box.remove() }, "✕"),
-  );
+  let watch = null;
   const inp = (k, attrs = {}) => h("input", { "data-k": k, value: a[k] ?? "", ...attrs });
   let grid;
   if (a.type === "http") {
@@ -862,7 +929,7 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
     // Only a rule's own delays can watch for events. A watch anywhere else
     // (typed in JSON) is kept as it is, so saving explains why it's refused
     // instead of quietly dropping it.
-    if (!fixed && container.id === "f-actions") box.append(head, grid, watchSection(a, box));
+    if (!fixed && container.id === "f-actions") watch = watchSection(a, box);
     else if (a.watch) {
       box.dataset.watch = JSON.stringify(a.watch);
       grid.append(h("p.error.full", {}, "This delay watches for events, which only the rule's own delays can do. Edit or remove the watch in JSON."));
@@ -875,9 +942,77 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
     grid = h("pre", {}, JSON.stringify(a, null, 2));
     box.dataset.raw = JSON.stringify(a);
   }
-  if (!box.childElementCount) box.append(...[head, grid].filter(Boolean));
+  if (fixed) {
+    box.append(grid);
+    container.append(box);
+    return box;
+  }
+  box._body = h("div.action-body", { id: `step-${++stepSeq}` }, grid, watch);
+  box.append(stepHead(box), box._body);
   container.append(box);
+  setStepOpen(box, open);
+  // The summary follows the form, and an edit clears a save error's mark.
+  for (const type of ["input", "change", "click"]) box.addEventListener(type, () => box._refresh());
+  box.addEventListener("input", () => box.classList.remove("has-error"));
+  stepsChanged(container);
   return box;
+}
+
+let stepSeq = 0;
+
+// stepHead is a step card's header. It sets box._refresh, which redraws the
+// summary from the form.
+function stepHead(box) {
+  const num = h("span.step-num", {});
+  const text = h("span.step-summary", {});
+  const toggle = h("button.step-toggle", { type: "button", "aria-controls": box._body.id, onclick: () => setStepOpen(box, box.dataset.open !== "true") },
+    h("span.step-chevron", { "aria-hidden": "true" }), num, text);
+  box._num = num;
+  box._refresh = () => {
+    let summary;
+    try { summary = stepTitle(readAction(box)); } catch { summary = ACTION_LABELS[box.dataset.type] || box.dataset.type; }
+    text.textContent = summary;
+    toggle.title = summary;
+  };
+  const tool = (label, icon, onclick, cls = "") => h("button.btn.small" + cls, { type: "button", "aria-label": label, title: label, onclick }, icon);
+  const list = () => box.parentNode;
+  return h("div.step-head", {}, toggle,
+    h("div.step-tools", {},
+      tool("Move up", "↑", () => { if (box.previousElementSibling) list().insertBefore(box, box.previousElementSibling); stepsChanged(list()); }),
+      tool("Move down", "↓", () => { if (box.nextElementSibling) list().insertBefore(box.nextElementSibling, box); stepsChanged(list()); }),
+      tool("Duplicate step", "⧉", () => {
+        const copy = addActionBox(readAction(box), list(), { open: true });
+        box.after(copy);
+        stepsChanged(list());
+      }),
+      tool("Remove step", "✕", () => { const l = list(); box.remove(); stepsChanged(l); }, ".danger")));
+}
+
+function setStepOpen(box, open) {
+  box.dataset.open = String(open);
+  box._body.classList.toggle("hidden", !open);
+  $(".step-toggle", box).setAttribute("aria-expanded", String(open));
+}
+
+// stepsChanged renumbers a step list after a step is added, moved or
+// removed, and tells the editor (a bubbling "stepschange" event).
+function stepsChanged(list) {
+  $$(":scope > .action-box", list).forEach((b, i) => {
+    if (b._num) b._num.textContent = String(i + 1);
+    b._refresh?.();
+  });
+  list.dispatchEvent(new CustomEvent("stepschange", { bubbles: true }));
+}
+
+// stepTitle is a step card's one-line summary: actionSummary, capitalised,
+// or what's still missing.
+function stepTitle(a) {
+  const label = a.name ? `${a.name}: ` : "";
+  if (a.type === "http" && !a.url) return `${label}HTTP request (no URL yet)`;
+  if (a.type === "request" && !a.requestId) return `${label}Saved action (none chosen yet)`;
+  if (a.type === "discord" && !a.message && !a.discord?.embeds?.length) return `${label}Discord message (no message yet)`;
+  const s = actionSummary(a);
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 // watchSection is a delay's "While waiting, watch for events" settings
@@ -893,7 +1028,7 @@ function watchSection(a, box) {
   const note = h("p.muted.small.hidden", {}, NO_SUGGESTIONS);
   const loadStats = fieldStatsLoader((data) => {
     fieldStats = data;
-    note.classList.toggle("hidden", !!data.fields.length);
+    note.classList.toggle("hidden", !data || !!data.fields.length);
   });
   let own = [[], []]; // the watch's own topics and codes
   const refreshStats = () => { if (on.checked) loadStats(...(same.checked ? [selectedTopics(), readCodes()] : own)); };
@@ -914,7 +1049,7 @@ function watchSection(a, box) {
   (w.actions || []).forEach((x) => addActionBox(x, acts));
   (w.ifNoMatch || []).forEach((x) => addActionBox(x, quiet));
   const addButtons = (list) => h("div.row", {}, [["discord", "+ Discord message"], ["http", "+ HTTP request"], ["request", "+ Saved action"]].map(([type, label]) =>
-    h("button.btn.small", { type: "button", onclick: () => { addActionBox(blankAction(type), list); schedulePreview(); } }, label)));
+    h("button.btn.small", { type: "button", onclick: () => { addActionBox(blankAction(type), list, { open: true }); schedulePreview(); } }, label)));
   const actsBlock = h("div.w-sub", {}, acts, addButtons(acts),
     h("label.inline", {}, every, "Run them on every match, not just the first"));
 
@@ -1211,7 +1346,7 @@ function wirePreview() {
   for (const type of ["input", "change"]) {
     $("#editor-visual").addEventListener(type, (e) => { if (e.target !== box) schedulePreview(); });
   }
-  $("#editor-visual").addEventListener("click", (e) => { if (e.target.closest(".action-head button, .ff-del, .pill button")) schedulePreview(); });
+  $("#editor-visual").addEventListener("click", (e) => { if (e.target.closest(".step-tools button, .action-head button, .ff-del, .pill button")) schedulePreview(); });
 }
 
 function schedulePreview() {
@@ -1242,10 +1377,11 @@ async function runPreview() {
     res.matchesTrigger ? "." : h("span.error", {}, " (it doesn't pass this rule's filters, so values may differ from real events)."));
   $("#preview-note").classList.remove("hidden");
   const show = (boxes, results) => boxes.forEach((box, i) => {
-    $(":scope > .preview", box)?.remove();
+    const host = box._body || box; // inside the card's form, so it folds with it
+    $(":scope > .preview", host)?.remove();
     const fields = results?.[i] || [];
     if (!fields.length) return;
-    box.append(h("div.preview", {}, h("div.preview-title", {}, "Preview"),
+    host.append(h("div.preview", {}, h("div.preview-title", {}, "Preview"),
       fields.map((f) => h("div.pv-row", {},
         h("span.pv-field", {}, f.field),
         f.error ? h("span.pv-value.error", {}, f.error) : h("code.pv-value", {}, f.value || "(empty)")))));

@@ -150,76 +150,99 @@
     </section>
   </main>
 
-  <dialog id="editor">
+  <dialog id="editor" aria-labelledby="editor-title">
     <form method="dialog" id="editor-form">
-      <header class="dlg-head">
-        <h2 id="editor-title">Rule</h2>
-        <label class="inline"><input type="checkbox" id="editor-json-mode"> Edit as JSON</label>
+      <header class="editor-head">
+        <h2 id="editor-title" class="editor-kicker">Rule</h2>
+        <div class="editor-top">
+          <div id="editor-basics" class="editor-basics">
+            <input id="f-name" class="rule-name" required maxlength="120" aria-label="Rule name" placeholder="Name this rule">
+            <label class="switch"><input type="checkbox" id="f-enabled" role="switch" aria-label="Enabled" checked><span id="f-enabled-text" aria-hidden="true">On</span></label>
+          </div>
+          <details class="menu" id="editor-menu">
+            <summary class="btn small" aria-label="More options" title="More options">⋯</summary>
+            <div class="menu-list">
+              <label class="inline"><input type="checkbox" id="editor-json-mode"> Edit as JSON</label>
+            </div>
+          </details>
+        </div>
       </header>
       <div id="editor-visual">
-        <label>Name <input id="f-name" required maxlength="120"></label>
-        <label class="inline"><input type="checkbox" id="f-enabled" checked> Enabled</label>
+        <section class="ed-section" aria-labelledby="ed-when">
+          <h3 id="ed-when">When this happens</h3>
+          <div class="grid2 even">
+            <div><div class="field-label">Topics</div><div id="f-topics" class="picker"></div></div>
+            <div><div class="field-label">Event codes</div><div id="f-codes" class="picker"></div></div>
+          </div>
+          <div class="field-label">Only if… <span class="muted small">(all must match; pick a property from recent events or type your own)</span></div>
+          <div id="f-filters"></div>
+          <p id="f-filters-note" class="muted small hidden"></p>
+          <button type="button" class="btn small" id="add-filter">+ Add condition</button>
+        </section>
 
-        <h3>When to ignore events <span class="muted small">(ignored events are still logged)</span></h3>
-        <label class="inline"><input type="checkbox" id="f-skip-running"> Ignore new events while this rule is still running</label>
-        <div class="row">
-          <span>Run at most once every</span>
-          <span id="f-cooldown"></span>
-          <span>counted from when the last run</span>
-          <select id="f-cooldown-from">
-            <option value="start">started</option>
-            <option value="finish">finished</option>
-          </select>
-          <span class="muted small">(all zeros = no limit)</span>
-        </div>
-        <div class="row">
-          <label class="inline">Only run during <select id="f-schedule" aria-label="Schedule"></select></label>
-          <span id="f-schedule-info" class="muted small"></span>
-        </div>
+        <section class="ed-section" aria-labelledby="ed-steps">
+          <div class="then-head">
+            <h3 id="ed-steps">Do these steps, in order</h3>
+            <label class="inline small"><input type="checkbox" id="f-preview-on"> Preview templates</label>
+          </div>
+          <p id="preview-note" class="muted small hidden"></p>
+          <div id="f-actions" class="steps"></div>
+          <details class="menu add-menu">
+            <summary class="btn small">+ Add step</summary>
+            <div class="menu-list">
+              <button type="button" class="menu-item" data-add-action="http">HTTP request</button>
+              <button type="button" class="menu-item" data-add-action="delay">Wait</button>
+              <button type="button" class="menu-item" data-add-action="discord">Discord message</button>
+              <button type="button" class="menu-item" data-add-action="request">Saved action</button>
+            </div>
+          </details>
+          <details class="help">
+            <summary>Template help</summary>
+            <p>URL, body, header values, password and messages are Go templates.</p>
+            <ul>
+              <li><code>{{ .data.deviceName }}</code>, <code>{{ .data.siteName }}</code>, <code>{{ .data.videoSourceId }}</code> – event data</li>
+              <li><code>{{ .event.eventCode }}</code>, <code>{{ .event.eventTopic }}</code>, <code>{{ .event.key }}</code>, <code>{{ .rule }}</code></li>
+              <li><code>{{ json .data.deviceName }}</code> – JSON-quoted value for JSON bodies</li>
+              <li><code>{{ urlquery .data.deviceName }}</code> – URL-escaped value</li>
+              <li><code>{{ regexquote .data.deviceName }}</code> – matches the value literally in a regex watch filter</li>
+              <li><code>{{ .params.preset }}</code> – inside a saved action: a value the rule fills in</li>
+              <li><code>{{ secret "FRONT_CAM_PASS" }}</code> – one of <em>your</em> secrets (Secrets tab), or an operator env secret <code>Y6IFTTT_SECRET_FRONT_CAM_PASS</code>. The name must be a quoted literal.</li>
+            </ul>
+          </details>
+        </section>
 
-        <h3>If… <span class="muted small">(empty = any)</span></h3>
-        <div class="grid2 even">
-          <div><div class="field-label">Topics</div><div id="f-topics" class="picker"></div></div>
-          <div><div class="field-label">Event codes</div><div id="f-codes" class="picker"></div></div>
-        </div>
-        <div class="field-label">Conditions <span class="muted small">(all must match; pick a property from recent events or type your own)</span></div>
-        <div id="f-filters"></div>
-        <p id="f-filters-note" class="muted small hidden">Suggestions appear once events start arriving.</p>
-        <button type="button" class="btn small" id="add-filter">+ Add condition</button>
+        <details class="ed-section ed-fold" id="f-onfail-fold">
+          <summary><span class="fold-title">If something goes wrong</span> <span id="f-onfail-count" class="muted small"></span></summary>
+          <p class="muted small">Runs after a step fails, e.g. to post an alert. Templates here also see <code>{{ .failure.step }}</code>, <code>{{ .failure.stepNumber }}</code> and <code>{{ .failure.error }}</code>.</p>
+          <div id="f-onfail" class="steps"></div>
+          <details class="menu add-menu">
+            <summary class="btn small">+ Add step</summary>
+            <div class="menu-list">
+              <button type="button" class="menu-item" data-add-fail="discord">Discord message</button>
+              <button type="button" class="menu-item" data-add-fail="http">HTTP request</button>
+              <button type="button" class="menu-item" data-add-fail="request">Saved action</button>
+            </div>
+          </details>
+        </details>
 
-        <div class="then-head">
-          <h3>Then…</h3>
-          <label class="inline small"><input type="checkbox" id="f-preview-on"> Preview templates</label>
-        </div>
-        <p id="preview-note" class="muted small hidden"></p>
-        <div id="f-actions"></div>
-        <div class="row">
-          <button type="button" class="btn small" data-add-action="http">+ HTTP request</button>
-          <button type="button" class="btn small" data-add-action="delay">+ Wait</button>
-          <button type="button" class="btn small" data-add-action="discord">+ Discord message</button>
-          <button type="button" class="btn small" data-add-action="request">+ Saved action</button>
-        </div>
-
-        <h3>If anything fails… <span class="muted small">(optional)</span></h3>
-        <p class="muted small">Runs after a step fails, e.g. to post an alert. Templates here also see <code>{{ .failure.step }}</code>, <code>{{ .failure.stepNumber }}</code> and <code>{{ .failure.error }}</code>.</p>
-        <div id="f-onfail"></div>
-        <div class="row">
-          <button type="button" class="btn small" data-add-fail="discord">+ Discord message</button>
-          <button type="button" class="btn small" data-add-fail="http">+ HTTP request</button>
-          <button type="button" class="btn small" data-add-fail="request">+ Saved action</button>
-        </div>
-        <details class="help">
-          <summary>Template help</summary>
-          <p>URL, body, header values, password and messages are Go templates.</p>
-          <ul>
-            <li><code>{{ .data.deviceName }}</code>, <code>{{ .data.siteName }}</code>, <code>{{ .data.videoSourceId }}</code> – event data</li>
-            <li><code>{{ .event.eventCode }}</code>, <code>{{ .event.eventTopic }}</code>, <code>{{ .event.key }}</code>, <code>{{ .rule }}</code></li>
-            <li><code>{{ json .data.deviceName }}</code> – JSON-quoted value for JSON bodies</li>
-            <li><code>{{ urlquery .data.deviceName }}</code> – URL-escaped value</li>
-            <li><code>{{ regexquote .data.deviceName }}</code> – matches the value literally in a regex watch filter</li>
-            <li><code>{{ .params.preset }}</code> – inside a saved action: a value the rule fills in</li>
-            <li><code>{{ secret "FRONT_CAM_PASS" }}</code> – one of <em>your</em> secrets (Secrets tab), or an operator env secret <code>Y6IFTTT_SECRET_FRONT_CAM_PASS</code>. The name must be a quoted literal.</li>
-          </ul>
+        <details class="ed-section ed-fold" id="f-limits-fold">
+          <summary><span class="fold-title">Limits and schedule</span> <span id="f-limits-summary" class="muted small"></span></summary>
+          <div class="row">
+            <label class="inline">Only run during <select id="f-schedule" aria-label="Schedule"></select></label>
+            <span id="f-schedule-info" class="muted small"></span>
+          </div>
+          <div class="row">
+            <span>Run at most once every</span>
+            <span id="f-cooldown"></span>
+            <span>counted from when the last run</span>
+            <select id="f-cooldown-from" aria-label="Counted from when the last run">
+              <option value="start">started</option>
+              <option value="finish">finished</option>
+            </select>
+            <span class="muted small">(all zeros = no limit)</span>
+          </div>
+          <label class="inline"><input type="checkbox" id="f-skip-running"> Ignore new events while this rule is still running</label>
+          <p class="muted small">Ignored events are still logged.</p>
         </details>
       </div>
       <div id="editor-json" class="hidden">

@@ -175,12 +175,32 @@ function fieldOptions(stats, typed) {
   return out;
 }
 
+// ---------- rule editor ----------
+// limitsSummary is the one-line summary of a rule's "Limits and schedule"
+// section, e.g. "Weeknights · at most once every 5 m · skips while running".
+function limitsSummary({ scheduleName, cooldownSeconds, cooldownFrom, skipIfRunning }) {
+  const cooldown = cooldownSeconds > 0;
+  const parts = [scheduleName || "Any time"];
+  if (cooldown) parts.push(`at most once every ${fmtSpan(cooldownSeconds * 1000)}${cooldownFrom === "finish" ? " after the last run finishes" : ""}`);
+  if (skipIfRunning) parts.push("skips while running");
+  else if (!cooldown) parts.push("no limit");
+  return parts.join(" · ");
+}
+
+// stepErrorIndex finds the step a server validation error is about:
+// "action 3: …" is {list: "actions", index: 2} and "on-failure action 1: …"
+// is {list: "onFailure", index: 0}. Other errors give null.
+function stepErrorIndex(message) {
+  const m = /^(on-failure )?action (\d+)\b/.exec(message || "");
+  return m ? { list: m[1] ? "onFailure" : "actions", index: Number(m[2]) - 1 } : null;
+}
+
 // Node (the JS tests) gets the helpers as a module; browsers get globals.
 if (typeof module !== "undefined") {
   module.exports = {
     VOLATILE_KEYS, contentOf, pretty, changedKeys, lineDiff,
     DAYS, DAY_KEYS, DEFAULT_TZ, COMMON_TZ, tzLabel, WEEK_MINUTES, hm, fmtMinute,
     coverage, scheduleCoverage, zonedMinute, scheduleActive, redundantWindows, windowSummary, scheduleText,
-    splitSpan, joinSpan, fmtSpan, OP_LABELS, opNeedsValue, fieldOptions,
+    splitSpan, joinSpan, fmtSpan, OP_LABELS, opNeedsValue, fieldOptions, limitsSummary, stepErrorIndex,
   };
 }
