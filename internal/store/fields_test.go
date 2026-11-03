@@ -36,17 +36,18 @@ func TestFieldStatsNarrowsAndCounts(t *testing.T) {
 	insertRaw(t, st, "device", "vmd", map[string]any{"deviceName": "CAM-01"})
 	insertRaw(t, st, "device", "vmd", map[string]any{"deviceName": "CAM-01"})
 	insertRaw(t, st, "device", "vmd", map[string]any{"deviceName": "CAM-02"})
+	insertRaw(t, st, "Device", "VMD", map[string]any{"deviceName": "CAM-01"})
 	insertRaw(t, st, "peripheral", "input_activated", map[string]any{"peripheralName": "Door"})
 
 	ctx := context.Background()
-	want := []ValueCount{{"CAM-01", 2}, {"CAM-02", 1}}
+	want := []ValueCount{{"CAM-01", 3}, {"CAM-02", 1}}
 	for _, codes := range [][]string{nil, {"device:vmd"}, {"vmd"}} {
 		fs, err := st.FieldStats(ctx, []string{"device"}, codes, 500)
 		if err != nil {
 			t.Fatal(err)
 		}
 		f := fieldByName(fs, "deviceName")
-		if f == nil || f.Seen != 3 || !reflect.DeepEqual(f.Values, want) {
+		if f == nil || f.Seen != 4 || !reflect.DeepEqual(f.Values, want) {
 			t.Fatalf("codes %v: %+v", codes, f)
 		}
 		if fieldByName(fs, "peripheralName") != nil {

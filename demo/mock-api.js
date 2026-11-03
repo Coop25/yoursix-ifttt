@@ -767,7 +767,7 @@
         if (topics.length && !topics.includes(topic)) continue;
         if (codes.length && !codes.includes(code) && !codes.includes(`${topic}:${code}`)) continue;
         for (const k of ["eventCode", "eventTopic", "eventDescription"]) if (k in p) add(k, p[k]);
-        for (const [k, v] of Object.entries(p.eventData || {})) add(k, v);
+        if (p.eventData && typeof p.eventData === "object" && !Array.isArray(p.eventData)) for (const [k, v] of Object.entries(p.eventData)) add(k, v);
       }
       const fields = Object.entries(acc).map(([name, a]) => ({
         name, seen: a.seen,

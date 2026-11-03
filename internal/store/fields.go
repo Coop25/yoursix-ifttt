@@ -35,7 +35,7 @@ func (s *Store) FieldStats(ctx context.Context, topics, codes []string, limit in
 		args  []any
 	)
 	if len(topics) > 0 {
-		where = append(where, "topic IN (?"+strings.Repeat(",?", len(topics)-1)+")")
+		where = append(where, "lower(topic) IN (?"+strings.Repeat(",?", len(topics)-1)+")")
 		for _, t := range topics {
 			args = append(args, strings.ToLower(t))
 		}
@@ -45,10 +45,10 @@ func (s *Store) FieldStats(ctx context.Context, topics, codes []string, limit in
 		for _, c := range codes {
 			c = strings.ToLower(c)
 			if topic, code, ok := strings.Cut(c, ":"); ok {
-				ors = append(ors, "(topic = ? AND code = ?)")
+				ors = append(ors, "(lower(topic) = ? AND lower(code) = ?)")
 				args = append(args, topic, code)
 			} else {
-				ors = append(ors, "code = ?")
+				ors = append(ors, "lower(code) = ?")
 				args = append(args, c)
 			}
 		}
