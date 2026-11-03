@@ -64,13 +64,16 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"topics": topics, "codes": yoursix.Catalog})
 }
 
+const maxFieldFilters = 50
+
 // handleCatalogFields suggests property names and values seen in recent
-// events, optionally narrowed by ?topics=a,b&codes=x,y.
+// events, optionally narrowed by ?topics=a,b&codes=x,y. Only the first
+// maxFieldFilters topics and codes are used, to bound the query.
 func (s *Server) handleCatalogFields(w http.ResponseWriter, r *http.Request) {
 	split := func(v string) []string {
 		var out []string
 		for _, p := range strings.Split(v, ",") {
-			if p = strings.TrimSpace(p); p != "" {
+			if p = strings.TrimSpace(p); p != "" && len(out) < maxFieldFilters {
 				out = append(out, p)
 			}
 		}
