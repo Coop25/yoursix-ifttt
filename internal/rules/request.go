@@ -114,13 +114,20 @@ func (s SavedRequest) AllActions() []Action {
 	return out
 }
 
-// Relabel rewrites an ActionError about s.AllActions() that concerns one of
-// the watch's actions to name it, e.g. "watch action 1". Other errors are
-// returned as they are.
+// Relabel rewrites an ActionError about s.AllActions(): one about the saved
+// action itself (index 0) loses its "action 1" label, since a saved action
+// has only one, and one about the watch's actions names it, e.g. "watch
+// action 1". Other errors are returned as they are.
 func (s SavedRequest) Relabel(err error) error {
 	var ae *ActionError
+	if !errors.As(err, &ae) {
+		return err
+	}
+	if ae.Index == 0 {
+		return ae.Err
+	}
 	w := s.Request.Watch
-	if !errors.As(err, &ae) || ae.Index < 1 || w == nil {
+	if w == nil {
 		return err
 	}
 	if i := ae.Index - 1; i < len(w.Actions) {

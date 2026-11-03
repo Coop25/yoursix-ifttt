@@ -28,10 +28,11 @@ type FieldStat struct {
 // FieldStats summarises the property names, and the most common values, found
 // in the latest limit stored events. topics and codes narrow the events the
 // way a rule trigger does: a bare code matches any topic, "topic:code" only
-// that topic. Empty lists match everything.
+// that topic. Empty lists match everything. Test events are left out: their
+// made-up sample values (CAM-01, HQ) would be suggested as if real.
 func (s *Store) FieldStats(ctx context.Context, topics, codes []string, limit int) ([]FieldStat, error) {
 	var (
-		where []string
+		where = []string{"test = 0"}
 		args  []any
 	)
 	if len(topics) > 0 {
@@ -54,11 +55,7 @@ func (s *Store) FieldStats(ctx context.Context, topics, codes []string, limit in
 		}
 		where = append(where, "("+strings.Join(ors, " OR ")+")")
 	}
-	q := `SELECT payload FROM events`
-	if len(where) > 0 {
-		q += ` WHERE ` + strings.Join(where, " AND ")
-	}
-	q += ` ORDER BY id DESC LIMIT ?`
+	q := `SELECT payload FROM events WHERE ` + strings.Join(where, " AND ") + ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {

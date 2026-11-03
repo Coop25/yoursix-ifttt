@@ -730,8 +730,12 @@ func (r *Runner) resolveSaved(ctx context.Context, a rules.Action, data map[stri
 	if err != nil {
 		return sr, nil, fmt.Errorf("saved action %q: %w", sr.Name, err)
 	}
-	if len(refs) > 0 && (sr.UpdatedBy != owner || wait != nil && sr.UpdatedBy != wait.UpdatedBy) {
+	if len(refs) > 0 && sr.UpdatedBy != owner {
 		return sr, nil, fmt.Errorf("saved action %q uses secrets belonging to %s; only their rules and saved actions can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))
+	}
+	if len(refs) > 0 && wait != nil && sr.UpdatedBy != wait.UpdatedBy {
+		return sr, nil, fmt.Errorf("saved action %q uses secrets belonging to %s, but saved wait %q that runs it was last saved by %s; only their own saved waits can run it",
+			sr.Name, nameOr(sr.UpdatedByName, "another admin"), wait.Name, nameOr(wait.UpdatedByName, "another admin"))
 	}
 
 	given := make(map[string]string, len(a.Params))

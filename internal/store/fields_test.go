@@ -75,6 +75,27 @@ func TestFieldStatsSkipsComplexAndLong(t *testing.T) {
 	}
 }
 
+// Events the Test buttons make up (sample cameras like CAM-01) aren't real,
+// so they aren't suggested.
+func TestFieldStatsSkipsTestEvents(t *testing.T) {
+	st := openTest(t, filepath.Join(t.TempDir(), "f.db"))
+	insertRaw(t, st, "device", "vmd", map[string]any{"deviceName": "Shop cam"})
+	sample := yoursix.Sample(yoursix.TopicDevice, "vmd")
+	sample.EventID = ""
+	raw, _ := json.Marshal(sample)
+	if _, _, err := st.InsertEvent(context.Background(), sample, raw, "test:alice", true); err != nil {
+		t.Fatal(err)
+	}
+	fs, err := st.FieldStats(context.Background(), nil, nil, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := fieldByName(fs, "deviceName")
+	if f == nil || f.Seen != 1 || !reflect.DeepEqual(f.Values, []ValueCount{{"Shop cam", 1}}) {
+		t.Fatalf("deviceName: %+v", f)
+	}
+}
+
 func TestFieldStatsCapsValues(t *testing.T) {
 	st := openTest(t, filepath.Join(t.TempDir(), "f.db"))
 	for i := 0; i < 25; i++ {

@@ -808,9 +808,10 @@ function comboBox({ value = "", placeholder = "", label, options }) {
       const down = e.key === "ArrowDown";
       if (!isOpen()) open();
       setActive(comboStep(active, items().length, down));
-    } else if (e.key === "Enter" && isOpen() && active >= 0) {
-      e.preventDefault(); // don't submit the form
-      pick(items()[active].dataset.value);
+    } else if (e.key === "Enter" && isOpen()) {
+      e.preventDefault(); // don't submit (save) the whole form
+      // A chosen suggestion, or else what's typed, as it is.
+      pick(active >= 0 ? items()[active].dataset.value : input.value);
     } else if (e.key === "Escape" && isOpen()) {
       e.preventDefault();
       e.stopPropagation(); // close the list, not the dialog
@@ -959,6 +960,7 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false, open = fa
   // The summary follows the form, and an edit clears a save error's mark.
   for (const type of ["input", "change", "click"]) box.addEventListener(type, () => box._refresh());
   box.addEventListener("input", () => box.classList.remove("has-error"));
+  box._refresh();
   stepsChanged(container);
   return box;
 }
@@ -1006,11 +1008,11 @@ function setStepOpen(box, open) {
 }
 
 // stepsChanged renumbers a step list after a step is added, moved or
-// removed, and tells the editor (a bubbling "stepschange" event).
+// removed, and tells the editor (a bubbling "stepschange" event). Summaries
+// don't include the number, so they're left as they are.
 function stepsChanged(list) {
   $$(":scope > .action-box", list).forEach((b, i) => {
     if (b._num) b._num.textContent = String(i + 1);
-    b._refresh?.();
   });
   list.dispatchEvent(new CustomEvent("stepschange", { bubbles: true }));
 }
@@ -1982,7 +1984,7 @@ function requestCard(sr) {
     sr.params.length
       ? h("p.summary", {}, "Parameters: ", sr.params.map((p) => h("span.badge", { title: p.description || "" }, p.default ? `${p.name} = ${p.default}` : `${p.name} (required)`)))
       : null,
-    h("p.summary", {}, sr.usedBy.length ? ["Used by: ", sr.usedBy.map((r) => h("span.badge", {}, r.name))] : "Not used by any rule yet."),
+    h("p.summary", {}, sr.usedBy.length ? ["Used by: ", sr.usedBy.map((r) => h("span.badge", { title: r.kind === "action" ? "A saved wait that runs this while it watches" : "" }, r.kind === "action" ? `saved wait: ${r.name}` : r.name))] : "Not used by any rule yet."),
     sr.updatedByName && state.me && sr.updatedBy !== state.me.id
       ? h("p.muted.small", {}, `Saved by ${sr.updatedByName}.`)
       : null,

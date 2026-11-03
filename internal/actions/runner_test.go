@@ -541,7 +541,9 @@ func TestSavedWaitCallingSecretActionRecheckedInWatch(t *testing.T) {
 	if ok || hits.Load() != 0 || len(res) != 1 || res[0].Watch == nil || len(res[0].Watch.Steps) != 1 {
 		t.Fatalf("ok=%v hits=%d res=%+v", ok, hits.Load(), res)
 	}
-	want := `saved action "Call" uses secrets belonging to Alice; only their rules and saved actions can use it`
+	// It names the saved wait's owner as the reason: the rule's owner (Alice)
+	// may use the action, but the wait's owner chose its parameters.
+	want := `saved action "Call" uses secrets belonging to Alice, but saved wait "Wait" that runs it was last saved by another admin; only their own saved waits can run it`
 	if got := res[0].Watch.Steps[0].Error; got != want {
 		t.Fatalf("watch step error %q, want %q", got, want)
 	}

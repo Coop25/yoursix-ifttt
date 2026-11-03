@@ -505,6 +505,14 @@ func (e *Engine) Preview(ctx context.Context, r rules.Rule, ev yoursix.Event) (a
 	data := ev.TemplateData(r.Name)
 	for i, a := range r.Actions {
 		acts = append(acts, e.runner.Preview(ctx, a, data))
+		if a.Type == rules.ActionRequest {
+			// A saved wait that watches gives later steps .watch too. Its own
+			// watch actions are previewed in the saved action's editor.
+			if sr, err := e.store.SavedRequest(ctx, a.RequestID); err == nil && sr.Request.Type == rules.ActionDelay && sr.Request.Watch != nil {
+				data["watch"] = actions.WatchData(actions.WatchResult{Matches: 1, Stopped: sr.Request.Watch.Stop}, &ev, 0)
+			}
+			continue
+		}
 		if a.Watch == nil {
 			continue
 		}

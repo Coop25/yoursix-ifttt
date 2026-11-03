@@ -240,6 +240,83 @@ func TestSavedActionRejectsNestedWatchingDelay(t *testing.T) {
 	}
 }
 
+// A saved action a saved wait's watch runs counts as in use: deleting it is
+// refused, and its "used by" names the wait.
+func TestSavedActionUsedBySavedWait(t *testing.T) {
+	ta := newTwoAdmins(t)
+	pan := ta.create(t, ta.alice, "/api/requests", map[string]any{
+		"name": "Pan home", "request": map[string]any{"type": "http", "method": "GET", "url": "http://cam.local/home"},
+	})
+	ta.create(t, ta.alice, "/api/requests", map[string]any{
+		"name": "Hold on shop", "request": map[string]any{"type": "delay", "delayMillis": 5,
+			"watch": map[string]any{"trigger": map[string]any{"codes": []string{"vmd"}},
+				"ifNoMatch": []map[string]any{{"type": "request", "requestId": pan}}}},
+	})
+
+	code, body := ta.do(t, ta.alice, "GET", fmt.Sprintf("/api/requests/%d", pan), nil)
+	if code != 200 || !strings.Contains(body, `"name":"Hold on shop","kind":"action"`) {
+		t.Fatalf("get: %d %s", code, body)
+	}
+	code, body = ta.do(t, ta.alice, "DELETE", fmt.Sprintf("/api/requests/%d", pan), nil)
+	if code != 409 || !strings.Contains(body, "saved wait(s): [Hold on shop]") {
+		t.Fatalf("delete: %d %s", code, body)
+	}
+}
+
+// A saved action can't start watching while something runs it where a
+// watching wait can't run: another delay's watch, or on-failure steps.
+func TestSavedActionCantStartWatchingUnderCallers(t *testing.T) {
+	ta := newTwoAdmins(t)
+	plain := map[string]any{"type": "delay", "delayMillis": 5}
+	watching := map[string]any{"type": "delay", "delayMillis": 5,
+		"watch": map[string]any{"trigger": map[string]any{"codes": []string{"vmd"}}, "stop": true}}
+	update := func(id int64) (int, string) {
+		return ta.do(t, ta.alice, "PUT", fmt.Sprintf("/api/requests/%d", id), map[string]any{"name": "Hold", "request": watching})
+	}
+	newPlain := func(name string) int64 {
+		return ta.create(t, ta.alice, "/api/requests", map[string]any{"name": name, "request": plain})
+	}
+	call := func(id int64) []map[string]any { return []map[string]any{{"type": "request", "requestId": id}} }
+
+	onFail := newPlain("on-failure")
+	ta.create(t, ta.alice, "/api/rules", map[string]any{"name": "R1", "enabled": true,
+		"trigger": map[string]any{"codes": []string{"vmd"}}, "actions": []map[string]any{plain}, "onFailure": call(onFail)})
+	if code, body := update(onFail); code != 400 || !strings.Contains(body, `rule \"R1\" runs this in \"If something goes wrong\"`) {
+		t.Fatalf("on-failure: %d %s", code, body)
+	}
+
+	inRuleWatch := newPlain("in rule watch")
+	ta.create(t, ta.alice, "/api/rules", map[string]any{"name": "R2", "enabled": true,
+		"trigger": map[string]any{"codes": []string{"vmd"}},
+		"actions": []map[string]any{{"type": "delay", "delayMillis": 5,
+			"watch": map[string]any{"trigger": map[string]any{"codes": []string{"vmd"}}, "actions": call(inRuleWatch)}}}})
+	if code, body := update(inRuleWatch); code != 400 || !strings.Contains(body, `rule \"R2\" runs this while another delay is watching`) {
+		t.Fatalf("rule watch: %d %s", code, body)
+	}
+
+	inSavedWait := newPlain("in saved wait")
+	ta.create(t, ta.alice, "/api/requests", map[string]any{"name": "Outer", "request": map[string]any{"type": "delay", "delayMillis": 5,
+		"watch": map[string]any{"trigger": map[string]any{"codes": []string{"vmd"}}, "ifNoMatch": call(inSavedWait)}}})
+	if code, body := update(inSavedWait); code != 400 || !strings.Contains(body, `saved wait \"Outer\" runs this while it is watching`) {
+		t.Fatalf("saved wait: %d %s", code, body)
+	}
+
+	self := newPlain("self")
+	code, body := ta.do(t, ta.alice, "PUT", fmt.Sprintf("/api/requests/%d", self), map[string]any{"name": "self", "request": map[string]any{"type": "delay", "delayMillis": 5,
+		"watch": map[string]any{"trigger": map[string]any{"codes": []string{"vmd"}}, "actions": call(self)}}})
+	if code != 400 || !strings.Contains(body, "can't run this saved action itself") {
+		t.Fatalf("self: %d %s", code, body)
+	}
+
+	// A plain top-level use is fine.
+	free := newPlain("free")
+	ta.create(t, ta.alice, "/api/rules", map[string]any{"name": "R3", "enabled": true,
+		"trigger": map[string]any{"codes": []string{"vmd"}}, "actions": call(free)})
+	if code, body := update(free); code != 200 {
+		t.Fatalf("top-level use: %d %s", code, body)
+	}
+}
+
 // savedWaitWithSecret is a saved wait whose if-no-match action sends CAM_PASS.
 func (ta *twoAdmins) savedWaitWithSecret() map[string]any {
 	return map[string]any{
