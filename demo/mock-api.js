@@ -753,6 +753,30 @@
   const routes = [
     ["GET", /^\/api\/me$/, () => json(200, { user: ME, version: "demo", devAuth: false })],
     ["GET", /^\/api\/catalog$/, () => json(200, { topics: Object.keys(CATALOG).sort(), codes: CATALOG, fields: FIELDS })],
+    ["GET", /^\/api\/catalog\/fields$/, (_, __, url) => {
+      const list = (k) => (url.searchParams.get(k) || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+      const topics = list("topics"), codes = list("codes");
+      const acc = {};
+      const add = (name, v) => {
+        const a = acc[name] || (acc[name] = { seen: 0, values: {} });
+        a.seen++;
+        if ((typeof v === "string" && v.length <= 100) || typeof v === "number" || typeof v === "boolean") a.values[String(v)] = (a.values[String(v)] || 0) + 1;
+      };
+      for (const e of S.events.slice(0, 500)) {
+        const p = e.payload, topic = String(p.eventTopic || "").toLowerCase(), code = String(p.eventCode || "").toLowerCase();
+        if (topics.length && !topics.includes(topic)) continue;
+        if (codes.length && !codes.includes(code) && !codes.includes(`${topic}:${code}`)) continue;
+        for (const k of ["eventCode", "eventTopic", "eventDescription"]) if (k in p) add(k, p[k]);
+        for (const [k, v] of Object.entries(p.eventData || {})) add(k, v);
+      }
+      const fields = Object.entries(acc).map(([name, a]) => ({
+        name, seen: a.seen,
+        values: Object.entries(a.values).map(([value, count]) => ({ value, count }))
+          .sort((x, y) => y.count - x.count || (x.value < y.value ? -1 : x.value > y.value ? 1 : 0)).slice(0, 20),
+      })).sort((x, y) => y.seen - x.seen || (x.name < y.name ? -1 : 1));
+      const seen = new Set(fields.map((f) => f.name));
+      return json(200, { fields, known: FIELDS.filter((f) => !seen.has(f)) });
+    }],
     ["GET", /^\/api\/info$/, () => json(200, { webhookUrl: "https://y6.example.com/hook/3f9c2b7e8a41d6c0e5b9a27f4d18c63e", requireUserAgent: true, verifySourceIp: true, clientIpHeader: "CF-Connecting-IP", retentionDays: 30, secretsEnabled: true })],
 
     ["GET", /^\/api\/rules$/, () => json(200, [...S.rules].sort((a, b) => a.name.localeCompare(b.name)).map(ruleView))],

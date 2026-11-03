@@ -196,3 +196,42 @@ func TestSessionRoundTrip(t *testing.T) {
 }
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
+func TestCatalogFieldsEndpoint(t *testing.T) {
+	srv, st := newTestServer(t, true)
+	ev := yoursix.Sample("device", "vmd")
+	raw, _ := json.Marshal(ev)
+	if _, _, err := st.InsertEvent(t.Context(), ev, raw, "1.2.3.4", false); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(srv.URL + "/api/catalog/fields?topics=device&codes=vmd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var got struct {
+		Fields []store.FieldStat `json:"fields"`
+		Known  []string          `json:"known"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Fields) == 0 || len(got.Known) == 0 {
+		t.Fatalf("fields %d known %d", len(got.Fields), len(got.Known))
+	}
+	seen := map[string]bool{}
+	for _, f := range got.Fields {
+		seen[f.Name] = true
+	}
+	if !seen["deviceName"] {
+		t.Fatal("deviceName missing from fields")
+	}
+	for _, k := range got.Known {
+		if seen[k] {
+			t.Fatalf("known repeats %q", k)
+		}
+	}
+}

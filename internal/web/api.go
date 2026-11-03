@@ -46,19 +46,53 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// knownFields are the documented event property names, offered as suggestions
+// even before an event carrying them has been received.
+var knownFields = []string{
+	"eventCode", "eventTopic", "eventDescription", "eventId",
+	"siteId", "siteName", "groupId", "groupName", "groupState", "groupActive",
+	"deviceId", "deviceName", "deviceDescription", "videoSourceId",
+	"barrierId", "barrierName", "peripheralId", "peripheralName", "sensorId", "sensorName",
+}
+
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	topics := make([]string, 0, len(yoursix.Catalog))
 	for t := range yoursix.Catalog {
 		topics = append(topics, t)
 	}
 	sort.Strings(topics)
-	fields := []string{
-		"eventCode", "eventTopic", "eventDescription", "eventId",
-		"siteId", "siteName", "groupId", "groupName", "groupState", "groupActive",
-		"deviceId", "deviceName", "deviceDescription", "videoSourceId",
-		"barrierId", "barrierName", "peripheralId", "peripheralName", "sensorId", "sensorName",
+	writeJSON(w, http.StatusOK, map[string]any{"topics": topics, "codes": yoursix.Catalog, "fields": knownFields})
+}
+
+// handleCatalogFields suggests property names and values seen in recent
+// events, optionally narrowed by ?topics=a,b&codes=x,y.
+func (s *Server) handleCatalogFields(w http.ResponseWriter, r *http.Request) {
+	split := func(v string) []string {
+		var out []string
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"topics": topics, "codes": yoursix.Catalog, "fields": fields})
+	q := r.URL.Query()
+	fields, err := s.store.FieldStats(r.Context(), split(q.Get("topics")), split(q.Get("codes")), 500)
+	if err != nil {
+		s.storeError(w, err)
+		return
+	}
+	seen := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		seen[f.Name] = true
+	}
+	known := []string{}
+	for _, k := range knownFields {
+		if !seen[k] {
+			known = append(known, k)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"fields": fields, "known": known})
 }
 
 func pathID(r *http.Request) (int64, bool) {
