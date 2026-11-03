@@ -575,7 +575,7 @@ function fillVisual(r) {
   ({ topics: state.topicPicker, codes: state.codePicker } = triggerPickers($("#f-topics"), $("#f-codes"), r.trigger, (topics, codes) => {
     loadFieldStats(topics, codes);
     // Delays that watch "the same events as this rule" follow its pickers.
-    $$("#f-actions .action-box, #f-onfail .action-box").forEach((b) => b.dispatchEvent(new CustomEvent("rulescope")));
+    $$("#f-actions > .action-box").forEach((b) => b.dispatchEvent(new CustomEvent("rulescope")));
   }));
 
   $("#f-filters").replaceChildren();
