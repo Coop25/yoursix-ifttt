@@ -75,9 +75,8 @@ func (r *Runner) watchedDelay(ctx context.Context, i int, a rules.Action, data m
 	}
 
 	var events <-chan yoursix.Event
-	rt := opts.RuleTrigger
 	switch {
-	case w.SameAsTrigger && len(rt.Topics) == 0 && len(rt.Codes) == 0 && len(rt.Filters) == 0:
+	case w.SameAsTrigger && opts.NoRule:
 		out.Note = "nothing to compare against: this action is being tested without a rule"
 	case opts.Watch != nil:
 		// Only the watch's own filters are templates, not the rule's.

@@ -363,7 +363,7 @@ func TestSavedDelayWatchSameAsCallingRule(t *testing.T) {
 
 func TestSavedDelayWatchWithoutRule(t *testing.T) {
 	src := savedDelay(&rules.Watch{SameAsTrigger: true})
-	opts := RunOptions{Watch: func(rules.Trigger) (<-chan yoursix.Event, func()) {
+	opts := RunOptions{NoRule: true, Watch: func(rules.Trigger) (<-chan yoursix.Event, func()) {
 		t.Fatal("subscribed without a rule trigger")
 		return nil, nil
 	}}
@@ -383,5 +383,73 @@ func TestNestedWatchingSavedDelayFails(t *testing.T) {
 	if ok || len(res) != 1 || res[0].Watch == nil || len(res[0].Watch.Steps) != 1 ||
 		!strings.Contains(res[0].Watch.Steps[0].Error, "can't run while another delay is watching") {
 		t.Fatalf("ok=%v res=%+v", ok, res)
+	}
+}
+
+// oneEvent feeds a single vmd event shortly after subscribing.
+func oneEvent(rules.Trigger) (<-chan yoursix.Event, func()) {
+	ch := make(chan yoursix.Event, 1)
+	time.AfterFunc(5*time.Millisecond, func() { ch <- yoursix.Event{EventCode: "vmd"} })
+	return ch, func() {}
+}
+
+func TestRuleDelayWatchWithEmptyRuleTriggerSubscribes(t *testing.T) {
+	var subscribed bool
+	opts := RunOptions{Watch: func(rules.Trigger) (<-chan yoursix.Event, func()) {
+		subscribed = true
+		return nil, func() {}
+	}}
+	acts := []rules.Action{{Type: rules.ActionDelay, DelayMillis: 10, Watch: &rules.Watch{SameAsTrigger: true}}}
+	res, ok := NewRunner("", "test").RunWith(context.Background(), acts, map[string]any{}, opts)
+	if !ok || !subscribed || res[0].Watch.Note != "" {
+		t.Fatalf("ok=%v subscribed=%v res=%+v", ok, subscribed, res)
+	}
+}
+
+func TestSavedDelayWatchVisibleToLaterSteps(t *testing.T) {
+	var got atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got.Store(r.URL.Query().Get("m")) }))
+	defer srv.Close()
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}})
+	acts := []rules.Action{
+		{Type: rules.ActionRequest, RequestID: 1},
+		{Type: rules.ActionHTTP, Method: "GET", URL: srv.URL + "?m={{ .watch.matches }}"},
+	}
+	res, ok := savedRunner(src).RunWith(context.Background(), acts, map[string]any{}, RunOptions{Watch: oneEvent})
+	if !ok || got.Load() != "1" {
+		t.Fatalf("ok=%v got=%v res=%+v", ok, got.Load(), res)
+	}
+}
+
+func TestSavedDelayWatchReportsRequestStep(t *testing.T) {
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}})
+	var types []string
+	opts := RunOptions{Watch: oneEvent, OnWatch: func(_ int, a rules.Action, _ WatchResult, _ time.Time) { types = append(types, a.Type) }}
+	if _, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{}, opts); !ok {
+		t.Fatal("not ok")
+	}
+	if len(types) != 1 || types[0] != rules.ActionRequest {
+		t.Fatalf("OnWatch types %v", types)
+	}
+}
+
+func TestSavedDelayWatchStopSkipsRest(t *testing.T) {
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}, Stop: true})
+	acts := []rules.Action{{Type: rules.ActionRequest, RequestID: 1}, {Type: rules.ActionDelay, DelayMillis: 1}}
+	res, ok := savedRunner(src).RunWith(context.Background(), acts, map[string]any{}, RunOptions{Watch: oneEvent})
+	if !ok || len(res) != 2 || !res[0].OK || !res[0].Watch.Stopped || !res[1].Skipped {
+		t.Fatalf("ok=%v res=%+v", ok, res)
+	}
+}
+
+func TestSavedDelayWatchRunsActions(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}},
+		Actions: []rules.Action{{Type: rules.ActionHTTP, Method: "GET", URL: srv.URL}}})
+	res, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{}, RunOptions{Watch: oneEvent})
+	if !ok || hits.Load() != 1 || len(res[0].Watch.Steps) != 1 {
+		t.Fatalf("ok=%v hits=%d res=%+v", ok, hits.Load(), res)
 	}
 }

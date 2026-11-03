@@ -196,7 +196,7 @@ func (s *Server) handleTestRequest(w http.ResponseWriter, r *http.Request) {
 	ev := yoursix.Sample(yoursix.TopicDevice, "vmd")
 	ev.EventID = ""
 	raw, _ := json.Marshal(ev)
-	run, err := s.engine.StartTestRun(r.Context(), rule, ev, raw, "test:"+u.Username)
+	run, err := s.engine.StartSavedActionTestRun(r.Context(), rule, ev, raw, "test:"+u.Username)
 	if err != nil {
 		s.storeError(w, err)
 		return

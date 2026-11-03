@@ -86,6 +86,10 @@ type RunOptions struct {
 	// it has seen so far and when it will now end.
 	OnWatch func(index int, a rules.Action, w WatchResult, until time.Time)
 
+	// NoRule is set when a saved action is tested on its own, so a watch that
+	// follows the rule's trigger has no trigger to follow.
+	NoRule bool
+
 	// inWatch is set while running a watch's own actions, where a delay can't
 	// watch for events itself.
 	inWatch bool
@@ -164,7 +168,18 @@ func (r *Runner) RunWith(ctx context.Context, actions []rules.Action, data map[s
 					break
 				}
 				var stop, failed bool
-				stop, failed, err = r.watchedDelay(ctx, i, sr.Request, withParams, opts, start, &res)
+				// Progress reports the rule's step, not the delay inside it.
+				wopts := opts
+				if opts.OnWatch != nil {
+					wopts.OnWatch = func(idx int, _ rules.Action, w WatchResult, until time.Time) {
+						opts.OnWatch(idx, a, w, until)
+					}
+				}
+				stop, failed, err = r.watchedDelay(ctx, i, sr.Request, withParams, wopts, start, &res)
+				// The rule's later steps see .watch too.
+				if w, found := withParams["watch"]; found {
+					data["watch"] = w
+				}
 				if failed {
 					ok = false
 				}
