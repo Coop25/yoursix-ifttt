@@ -85,6 +85,21 @@ type RunOptions struct {
 	// OnWatch, if set, is called on each match of a watched delay with what
 	// it has seen so far and when it will now end.
 	OnWatch func(index int, a rules.Action, w WatchResult, until time.Time)
+
+	// NoRule is set when a saved action is tested on its own, so a watch that
+	// follows the rule's trigger has no trigger to follow.
+	NoRule bool
+	// InOnFailure is set while running a rule's on-failure actions, which
+	// can't watch for events.
+	InOnFailure bool
+
+	// inWatch is set while running a watch's own actions, where a delay can't
+	// watch for events itself.
+	inWatch bool
+	// savedWait is the saved wait whose watch's actions are running, if any.
+	// Its owner chose the parameters those actions get, so a secret-using
+	// saved action among them must also have been last saved by that owner.
+	savedWait *rules.SavedRequest
 }
 
 func NewRunner(defaultDiscordWebhook, version string) *Runner {
@@ -147,6 +162,44 @@ func (r *Runner) RunWith(ctx context.Context, actions []rules.Action, data map[s
 			}
 			if stop {
 				stopped = true
+			}
+		} else if a.Type == rules.ActionRequest {
+			var sr rules.SavedRequest
+			var withParams map[string]any
+			sr, withParams, err = r.resolveSaved(ctx, a, data, lk, opts.Owner, opts.savedWait, &res)
+			switch {
+			case err != nil:
+			case sr.Request.Type == rules.ActionDelay && sr.Request.Watch != nil:
+				if opts.inWatch {
+					err = fmt.Errorf("saved action %q watches for events, so it can't run while another delay is watching", sr.Name)
+					break
+				}
+				if opts.InOnFailure {
+					err = OnFailureWatchError(sr.Name)
+					break
+				}
+				var stop, failed bool
+				// Progress reports the rule's step, not the delay inside it.
+				wopts := opts
+				wopts.savedWait = &sr
+				if opts.OnWatch != nil {
+					wopts.OnWatch = func(idx int, _ rules.Action, w WatchResult, until time.Time) {
+						opts.OnWatch(idx, a, w, until)
+					}
+				}
+				stop, failed, err = r.watchedDelay(ctx, i, sr.Request, withParams, wopts, start, &res)
+				// The rule's later steps see .watch too.
+				if w, found := withParams["watch"]; found {
+					data["watch"] = w
+				}
+				if failed {
+					ok = false
+				}
+				if stop {
+					stopped = true
+				}
+			default:
+				err = r.runResolved(ctx, sr, withParams, lk, opts.Owner, &res)
 			}
 		} else {
 			err = r.runOne(ctx, a, data, lk, opts.Owner, &res)
@@ -568,6 +621,35 @@ func SecretRefs(actions []rules.Action) ([]string, error) {
 	return out, nil
 }
 
+// SavedSecretRefs returns every secret a saved action uses: its own, and for
+// a saved wait, those of the saved actions its watch runs. Saved actions can't
+// themselves be "request" actions, and a watch can't run a watching delay, so
+// that one level is all that can run. A called action that can't be loaded is
+// skipped; its step fails when it runs, and it is checked again then.
+func SavedSecretRefs(ctx context.Context, src SavedRequestSource, sr rules.SavedRequest) ([]string, error) {
+	acts := sr.AllActions()
+	refs, err := SecretRefs(acts)
+	if err != nil || src == nil {
+		return refs, err
+	}
+	for _, a := range acts[1:] {
+		if a.Type != rules.ActionRequest {
+			continue
+		}
+		called, err := src.SavedRequest(ctx, a.RequestID)
+		if err != nil {
+			continue
+		}
+		more, err := SecretRefs(called.AllActions())
+		if err != nil {
+			return nil, fmt.Errorf("saved action %q: %w", called.Name, err)
+		}
+		refs = append(refs, more...)
+	}
+	sort.Strings(refs)
+	return slices.Compact(refs), nil
+}
+
 // explainHTTPError turns the usual network failures into messages that say
 // what to check. Rules typically call devices on the LAN, so the common
 // cause is that the app's container can't reach the device.
@@ -628,39 +710,45 @@ func noSecrets(string) (string, error) {
 	return "", errors.New("secrets can't be used in saved-action parameters; put the secret in the saved action itself")
 }
 
-// runSavedRequest runs a saved action (an HTTP request, delay or Discord
-// message) with the rule's parameter values.
-func (r *Runner) runSavedRequest(ctx context.Context, a rules.Action, data map[string]any, lk SecretLookup, owner string, res *StepResult) error {
+// resolveSaved loads the saved action a refers to, checks its secrets belong
+// to owner (and to wait's owner, when a saved wait's watch runs it), and
+// renders the rule's parameters. It returns the saved action and data with
+// .params added.
+func (r *Runner) resolveSaved(ctx context.Context, a rules.Action, data map[string]any, lk SecretLookup, owner string, wait *rules.SavedRequest, res *StepResult) (rules.SavedRequest, map[string]any, error) {
 	if r.Requests == nil {
-		return errors.New("saved actions are not available")
+		return rules.SavedRequest{}, nil, errors.New("saved actions are not available")
 	}
 	sr, err := r.Requests.SavedRequest(ctx, a.RequestID)
 	if err != nil {
-		return fmt.Errorf("saved action #%d: %w", a.RequestID, err)
+		return rules.SavedRequest{}, nil, fmt.Errorf("saved action #%d: %w", a.RequestID, err)
 	}
 	if res.Name == "" {
 		res.Name = sr.Name
 	}
 	// Re-checked at run time, against the action as it is now.
-	refs, err := SecretRefs([]rules.Action{sr.Request})
+	refs, err := SavedSecretRefs(ctx, r.Requests, sr)
 	if err != nil {
-		return fmt.Errorf("saved action %q: %w", sr.Name, err)
+		return sr, nil, fmt.Errorf("saved action %q: %w", sr.Name, err)
 	}
 	if len(refs) > 0 && sr.UpdatedBy != owner {
-		return fmt.Errorf("saved action %q uses secrets belonging to %s; only their rules can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))
+		return sr, nil, fmt.Errorf("saved action %q uses secrets belonging to %s; only their rules and saved actions can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))
+	}
+	if len(refs) > 0 && wait != nil && sr.UpdatedBy != wait.UpdatedBy {
+		return sr, nil, fmt.Errorf("saved action %q uses secrets belonging to %s, but saved wait %q that runs it was last saved by %s; only their own saved waits can run it",
+			sr.Name, nameOr(sr.UpdatedByName, "another admin"), wait.Name, nameOr(wait.UpdatedByName, "another admin"))
 	}
 
 	given := make(map[string]string, len(a.Params))
 	for k, v := range a.Params {
 		rv, err := Render(v, data, noSecrets)
 		if err != nil {
-			return fmt.Errorf("parameter %s: %w", k, err)
+			return sr, nil, fmt.Errorf("parameter %s: %w", k, err)
 		}
 		given[k] = rv
 	}
 	params, err := sr.ResolveParams(given)
 	if err != nil {
-		return err
+		return sr, nil, err
 	}
 
 	withParams := make(map[string]any, len(data)+1)
@@ -668,6 +756,23 @@ func (r *Runner) runSavedRequest(ctx context.Context, a rules.Action, data map[s
 		withParams[k] = v
 	}
 	withParams["params"] = params
+	return sr, withParams, nil
+}
+
+// runSavedRequest runs a saved action (an HTTP request, delay or Discord
+// message) with the rule's parameter values.
+func (r *Runner) runSavedRequest(ctx context.Context, a rules.Action, data map[string]any, lk SecretLookup, owner string, res *StepResult) error {
+	// RunWith resolves request actions itself, including a watch's, so no
+	// saved wait applies here.
+	sr, withParams, err := r.resolveSaved(ctx, a, data, lk, owner, nil, res)
+	if err != nil {
+		return err
+	}
+	return r.runResolved(ctx, sr, withParams, lk, owner, res)
+}
+
+// runResolved runs a saved action already resolved by resolveSaved.
+func (r *Runner) runResolved(ctx context.Context, sr rules.SavedRequest, withParams map[string]any, lk SecretLookup, owner string, res *StepResult) error {
 	switch sr.Request.Type {
 	case "", rules.ActionHTTP:
 		req := sr.Request
@@ -677,6 +782,12 @@ func (r *Runner) runSavedRequest(ctx context.Context, a rules.Action, data map[s
 		return r.runOne(ctx, sr.Request, withParams, lk, owner, res)
 	}
 	return fmt.Errorf("saved action %q can't run actions of type %q", sr.Name, sr.Request.Type)
+}
+
+// OnFailureWatchError is why an on-failure step can't run the saved action
+// name: it watches for events.
+func OnFailureWatchError(name string) error {
+	return fmt.Errorf("saved action %q watches for events, which steps in \"If something goes wrong\" can't do", name)
 }
 
 func nameOr(name, fallback string) string {

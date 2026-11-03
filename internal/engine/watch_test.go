@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -346,5 +347,63 @@ func TestWatchProgressThrottled(t *testing.T) {
 	}
 	if got := saves.Load(); got != 2 {
 		t.Fatalf("%d saves, want 2", got)
+	}
+}
+
+// A delay saved as a request watches for events just like an inline one,
+// so a matching event mid-wait restarts the countdown.
+func TestSavedDelayWatchRestartsInEngine(t *testing.T) {
+	h := newHarness(t)
+	rec := newRecorder(t)
+	saved, err := h.st.CreateRequest(context.Background(), rules.SavedRequest{
+		Name: "Lights off after motion",
+		Request: rules.Action{Type: rules.ActionDelay, DelayMillis: 400,
+			Watch: &rules.Watch{SameAsTrigger: true, Restart: true, MaxMillis: 800}},
+	}, store.Editor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := h.create(rules.Rule{SkipIfRunning: true, Trigger: rules.Trigger{Codes: []string{"vmd"}},
+		Actions: []rules.Action{
+			{Type: rules.ActionRequest, RequestID: saved.ID},
+			{Type: rules.ActionHTTP, URL: rec.url + "/?msg=done"},
+		}})
+
+	start := time.Now()
+	row := h.send(yoursix.Sample("device", "vmd"))
+	h.watching(1)
+	time.Sleep(200 * time.Millisecond)
+	h.send(yoursix.Sample("device", "vmd"))
+	run := h.run(row, r.ID)
+	if took := time.Since(start); took < 550*time.Millisecond {
+		t.Fatalf("run took %s; the countdown wasn't restarted", took)
+	}
+	w := run.Steps[0].Watch
+	if run.Status != store.RunOK || w == nil || w.Matches != 1 || w.Restarts != 1 {
+		t.Fatalf("run: %+v watch: %+v", run, w)
+	}
+	if got := rec.got(); len(got) != 1 || got[0] != "done" {
+		t.Fatalf("target got %q", got)
+	}
+}
+
+// On-failure steps can't watch, so a saved wait that does fails there
+// (a rule saved before this was checked still runs safely).
+func TestOnFailureWatchingSavedDelayFails(t *testing.T) {
+	h := newHarness(t)
+	saved, err := h.st.CreateRequest(context.Background(), rules.SavedRequest{
+		Name:    "Watcher",
+		Request: rules.Action{Type: rules.ActionDelay, DelayMillis: 50, Watch: &rules.Watch{SameAsTrigger: true, Stop: true}},
+	}, store.Editor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := h.create(rules.Rule{Trigger: rules.Trigger{Codes: []string{"vmd"}},
+		Actions:   []rules.Action{{Type: rules.ActionHTTP, URL: "http://127.0.0.1:1/x", TimeoutSeconds: 2}},
+		OnFailure: []rules.Action{{Type: rules.ActionRequest, RequestID: saved.ID}}})
+	run := h.run(h.send(yoursix.Sample("device", "vmd")), r.ID)
+	if run.Status != store.RunFailed || len(run.Steps) != 2 || !run.Steps[1].OnFailure ||
+		!strings.Contains(run.Steps[1].Error, `which steps in "If something goes wrong" can't do`) {
+		t.Fatalf("run: %+v", run)
 	}
 }

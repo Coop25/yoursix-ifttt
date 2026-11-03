@@ -87,3 +87,88 @@ test("tzLabel names common zones and passes others through", () => {
   assert.equal(fmtMinute(1440), "24:00");
   assert.equal(fmtMinute(9 * 60 + 5), "09:05");
 });
+
+test("splitSpan and joinSpan round-trip whole seconds", () => {
+  assert.deepEqual(splitSpan(5430000), { h: 1, m: 30, s: 30, exact: true });
+  assert.equal(joinSpan(1, 30, 30), 5430000);
+  assert.equal(joinSpan("", "5", ""), 300000);
+});
+test("splitSpan flags sub-second values", () => {
+  assert.deepEqual(splitSpan(1500), { h: 0, m: 0, s: 2, exact: false });
+});
+test("fmtSpan reads naturally", () => {
+  assert.equal(fmtSpan(45000), "45 s");
+  assert.equal(fmtSpan(300000), "5 m");
+  assert.equal(fmtSpan(5400000), "1 h 30 m");
+  assert.equal(fmtSpan(65000), "1 m 5 s");
+  assert.equal(fmtSpan(0), "0 s");
+  assert.equal(fmtSpan(1500), "1.5 s");
+});
+test("operator labels and value need", () => {
+  assert.equal(OP_LABELS.find(([v]) => v === "not_exists")[1], "doesn't exist");
+  assert.equal(opNeedsValue("exists"), false);
+  assert.equal(opNeedsValue("equals"), true);
+});
+
+const stats = { fields: [{ name: "deviceName", seen: 412, values: [] }, { name: "groupName", seen: 30, values: [] }], known: ["siteName", "deviceId"] };
+test("fieldOptions groups seen fields before other known ones", () => {
+  assert.deepEqual(fieldOptions(stats, ""), [
+    { group: "Seen in your events", value: "deviceName", label: "deviceName · 412" },
+    { group: "Seen in your events", value: "groupName", label: "groupName · 30" },
+    { group: "Other known fields", value: "siteName", label: "siteName" },
+    { group: "Other known fields", value: "deviceId", label: "deviceId" },
+  ]);
+});
+test("fieldOptions filters case-insensitively and offers typed text", () => {
+  assert.deepEqual(fieldOptions(stats, "NAME").map((o) => o.value), ["NAME", "deviceName", "groupName", "siteName"]);
+  assert.deepEqual(fieldOptions(stats, "data.custom"), [{ group: null, value: "data.custom", label: "Use “data.custom”" }]);
+});
+test("fieldOptions has no Use entry for an exact match", () => {
+  assert.deepEqual(fieldOptions(stats, "deviceName").map((o) => o.value), ["deviceName"]);
+  assert.deepEqual(fieldOptions(stats, "siteName").map((o) => o.group), ["Other known fields"]);
+});
+test("fieldOptions with no stats lists only known fields", () => {
+  const got = fieldOptions({ fields: [], known: ["siteName"] }, "");
+  assert.deepEqual(got, [{ group: "Other known fields", value: "siteName", label: "siteName" }]);
+  assert.deepEqual(fieldOptions(null, ""), []);
+});
+
+test("limitsSummary describes the schedule, cooldown and overlap setting", () => {
+  assert.equal(limitsSummary({ scheduleName: "", cooldownSeconds: 0, cooldownFrom: "start", skipIfRunning: false }), "Any time · no limit");
+  assert.equal(limitsSummary({ scheduleName: "Weeknights", cooldownSeconds: 300, cooldownFrom: "start", skipIfRunning: true }),
+    "Weeknights · at most once every 5 m · skips while running");
+  assert.equal(limitsSummary({ scheduleName: "", cooldownSeconds: 90, cooldownFrom: "finish", skipIfRunning: false }),
+    "Any time · at most once every 1 m 30 s after the last run finishes");
+  assert.equal(limitsSummary({ scheduleName: "Business hours", cooldownSeconds: 0, cooldownFrom: "start", skipIfRunning: true }),
+    "Business hours · skips while running");
+});
+test("stepErrorIndex finds the step a server error names", () => {
+  assert.deepEqual(stepErrorIndex("action 3: url is required"), { list: "actions", index: 2 });
+  assert.deepEqual(stepErrorIndex("on-failure action 1: x"), { list: "onFailure", index: 0 });
+  assert.deepEqual(stepErrorIndex("action 2, watch action 1: url is required"), { list: "actions", index: 1 });
+  assert.equal(stepErrorIndex("name is required"), null);
+  assert.equal(stepErrorIndex(""), null);
+});
+
+test("comboStep moves through suggestions, wrapping only past the ends", () => {
+  assert.equal(comboStep(-1, 5, true), 0); // ArrowDown from none: first
+  assert.equal(comboStep(-1, 5, false), 4); // ArrowUp from none: last
+  assert.equal(comboStep(0, 5, true), 1);
+  assert.equal(comboStep(4, 5, true), 0);
+  assert.equal(comboStep(0, 5, false), 4);
+  assert.equal(comboStep(2, 5, false), 1);
+  assert.equal(comboStep(-1, 0, true), -1);
+  assert.equal(comboStep(3, 0, false), -1);
+});
+
+test("sameAsStartTemplate reads event-level properties from .event and others from .data", () => {
+  assert.equal(sameAsStartTemplate("deviceName"), "{{ .data.deviceName }}");
+  assert.equal(sameAsStartTemplate("data.deviceName"), "{{ .data.deviceName }}");
+  assert.equal(sameAsStartTemplate("eventCode"), "{{ .event.eventCode }}");
+  assert.equal(sameAsStartTemplate("eventTopic"), "{{ .event.eventTopic }}");
+  assert.equal(sameAsStartTemplate("eventDescription"), "{{ .event.eventDescription }}");
+  assert.equal(sameAsStartTemplate("eventId"), "{{ .event.eventId }}");
+  assert.equal(sameAsStartTemplate("device-name"), '{{ index .data "device-name" }}');
+  assert.equal(sameAsStartTemplate("2nd"), '{{ index .data "2nd" }}');
+  assert.equal(sameAsStartTemplate('a "b"'), '{{ index .data "a \\"b\\"" }}');
+});

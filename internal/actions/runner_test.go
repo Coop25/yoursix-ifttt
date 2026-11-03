@@ -3,6 +3,7 @@ package actions
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"yoursix-ifttt/internal/mocktarget"
 	"yoursix-ifttt/internal/rules"
@@ -290,5 +292,292 @@ func TestWatchRegexFilters(t *testing.T) {
 	}
 	if _, err := renderWatch(filter("^{{ .data.deviceName }}[$"), data); err == nil || !strings.Contains(err.Error(), "regexquote") {
 		t.Fatalf("invalid regex: %v", err)
+	}
+}
+
+type fakeSaved map[int64]rules.SavedRequest
+
+func (f fakeSaved) SavedRequest(_ context.Context, id int64) (rules.SavedRequest, error) {
+	sr, ok := f[id]
+	if !ok {
+		return rules.SavedRequest{}, errors.New("not found")
+	}
+	return sr, nil
+}
+
+// savedDelay is a saved 30 ms delay that watches as w says.
+func savedDelay(w *rules.Watch, params ...rules.Param) fakeSaved {
+	return fakeSaved{1: {ID: 1, Name: "Wait", Params: params, Request: rules.Action{Type: rules.ActionDelay, DelayMillis: 30, Watch: w}}}
+}
+
+func savedRunner(src SavedRequestSource) *Runner {
+	r := NewRunner("", "test")
+	r.Requests = src
+	return r
+}
+
+func TestSavedDelayWatchRestarts(t *testing.T) {
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}, Restart: true, MaxMillis: 200})
+	opts := RunOptions{Watch: func(rules.Trigger) (<-chan yoursix.Event, func()) {
+		ch := make(chan yoursix.Event, 1)
+		time.AfterFunc(20*time.Millisecond, func() { ch <- yoursix.Event{EventCode: "vmd"} })
+		return ch, func() {}
+	}}
+	res, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{}, opts)
+	if !ok || len(res) != 1 || !res[0].OK || res[0].Watch == nil || res[0].Watch.Restarts != 1 || res[0].DurationMs < 45 {
+		t.Fatalf("ok=%v res=%+v", ok, res)
+	}
+}
+
+func TestSavedDelayWatchUsesParams(t *testing.T) {
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Filters: []rules.Filter{{Field: "deviceName", Op: rules.OpEquals, Value: "{{ .params.cam }}"}}}},
+		rules.Param{Name: "cam"})
+	var got rules.Trigger
+	opts := RunOptions{Watch: func(tr rules.Trigger) (<-chan yoursix.Event, func()) {
+		got = tr
+		return nil, func() {}
+	}}
+	acts := []rules.Action{{Type: rules.ActionRequest, RequestID: 1, Params: map[string]string{"cam": "CAM-01"}}}
+	if _, ok := savedRunner(src).RunWith(context.Background(), acts, map[string]any{}, opts); !ok {
+		t.Fatal("not ok")
+	}
+	if len(got.Filters) != 1 || got.Filters[0].Value != "CAM-01" {
+		t.Fatalf("trigger %+v", got)
+	}
+}
+
+func TestSavedDelayWatchSameAsCallingRule(t *testing.T) {
+	src := savedDelay(&rules.Watch{SameAsTrigger: true})
+	var got rules.Trigger
+	opts := RunOptions{RuleTrigger: rules.Trigger{Codes: []string{"pir"}}, Watch: func(tr rules.Trigger) (<-chan yoursix.Event, func()) {
+		got = tr
+		return nil, func() {}
+	}}
+	if _, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{}, opts); !ok {
+		t.Fatal("not ok")
+	}
+	if len(got.Codes) != 1 || got.Codes[0] != "pir" {
+		t.Fatalf("trigger %+v", got)
+	}
+}
+
+func TestSavedDelayWatchWithoutRule(t *testing.T) {
+	src := savedDelay(&rules.Watch{SameAsTrigger: true})
+	opts := RunOptions{NoRule: true, Watch: func(rules.Trigger) (<-chan yoursix.Event, func()) {
+		t.Fatal("subscribed without a rule trigger")
+		return nil, nil
+	}}
+	res, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{}, opts)
+	if !ok || len(res) != 1 || res[0].Watch == nil || res[0].Watch.Note == "" {
+		t.Fatalf("ok=%v res=%+v", ok, res)
+	}
+}
+
+func TestNestedWatchingSavedDelayFails(t *testing.T) {
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}})
+	acts := []rules.Action{{Type: rules.ActionDelay, DelayMillis: 10, Watch: &rules.Watch{
+		Trigger:   rules.Trigger{Codes: []string{"pir"}},
+		IfNoMatch: []rules.Action{{Type: rules.ActionRequest, RequestID: 1}},
+	}}}
+	res, ok := savedRunner(src).RunWith(context.Background(), acts, map[string]any{}, RunOptions{})
+	if ok || len(res) != 1 || res[0].Watch == nil || len(res[0].Watch.Steps) != 1 ||
+		!strings.Contains(res[0].Watch.Steps[0].Error, "can't run while another delay is watching") {
+		t.Fatalf("ok=%v res=%+v", ok, res)
+	}
+}
+
+// oneEvent feeds a single vmd event shortly after subscribing.
+func oneEvent(rules.Trigger) (<-chan yoursix.Event, func()) {
+	ch := make(chan yoursix.Event, 1)
+	time.AfterFunc(5*time.Millisecond, func() { ch <- yoursix.Event{EventCode: "vmd"} })
+	return ch, func() {}
+}
+
+func TestRuleDelayWatchWithEmptyRuleTriggerSubscribes(t *testing.T) {
+	var subscribed bool
+	opts := RunOptions{Watch: func(rules.Trigger) (<-chan yoursix.Event, func()) {
+		subscribed = true
+		return nil, func() {}
+	}}
+	acts := []rules.Action{{Type: rules.ActionDelay, DelayMillis: 10, Watch: &rules.Watch{SameAsTrigger: true}}}
+	res, ok := NewRunner("", "test").RunWith(context.Background(), acts, map[string]any{}, opts)
+	if !ok || !subscribed || res[0].Watch.Note != "" {
+		t.Fatalf("ok=%v subscribed=%v res=%+v", ok, subscribed, res)
+	}
+}
+
+func TestSavedDelayWatchVisibleToLaterSteps(t *testing.T) {
+	var got atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got.Store(r.URL.Query().Get("m")) }))
+	defer srv.Close()
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}})
+	acts := []rules.Action{
+		{Type: rules.ActionRequest, RequestID: 1},
+		{Type: rules.ActionHTTP, Method: "GET", URL: srv.URL + "?m={{ .watch.matches }}"},
+	}
+	res, ok := savedRunner(src).RunWith(context.Background(), acts, map[string]any{}, RunOptions{Watch: oneEvent})
+	if !ok || got.Load() != "1" {
+		t.Fatalf("ok=%v got=%v res=%+v", ok, got.Load(), res)
+	}
+}
+
+func TestSavedDelayWatchReportsRequestStep(t *testing.T) {
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}})
+	var types []string
+	opts := RunOptions{Watch: oneEvent, OnWatch: func(_ int, a rules.Action, _ WatchResult, _ time.Time) { types = append(types, a.Type) }}
+	if _, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{}, opts); !ok {
+		t.Fatal("not ok")
+	}
+	if len(types) != 1 || types[0] != rules.ActionRequest {
+		t.Fatalf("OnWatch types %v", types)
+	}
+}
+
+func TestSavedDelayWatchStopSkipsRest(t *testing.T) {
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}, Stop: true})
+	acts := []rules.Action{{Type: rules.ActionRequest, RequestID: 1}, {Type: rules.ActionDelay, DelayMillis: 1}}
+	res, ok := savedRunner(src).RunWith(context.Background(), acts, map[string]any{}, RunOptions{Watch: oneEvent})
+	if !ok || len(res) != 2 || !res[0].OK || !res[0].Watch.Stopped || !res[1].Skipped {
+		t.Fatalf("ok=%v res=%+v", ok, res)
+	}
+}
+
+func TestSavedDelayWatchRunsActions(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}},
+		Actions: []rules.Action{{Type: rules.ActionHTTP, Method: "GET", URL: srv.URL}}})
+	res, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{}, RunOptions{Watch: oneEvent})
+	if !ok || hits.Load() != 1 || len(res[0].Watch.Steps) != 1 {
+		t.Fatalf("ok=%v hits=%d res=%+v", ok, hits.Load(), res)
+	}
+}
+
+// A saved wait whose watch actions use a secret belongs to its owner like any
+// other secret-using saved action: another owner's rule must not run it.
+func TestSavedDelayWatchSecretsOwnerOnly(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	for name, w := range map[string]*rules.Watch{
+		"on match": {Trigger: rules.Trigger{Codes: []string{"vmd"}},
+			Actions: []rules.Action{{Type: rules.ActionHTTP, Method: "GET", URL: srv.URL + `?k={{ secret "CAM_PASS" }}`}}},
+		"if no match": {Trigger: rules.Trigger{Codes: []string{"vmd"}},
+			IfNoMatch: []rules.Action{{Type: rules.ActionHTTP, Method: "GET", URL: srv.URL + `?k={{ secret "CAM_PASS" }}`}}},
+	} {
+		src := savedDelay(w)
+		sr := src[1]
+		sr.UpdatedBy, sr.UpdatedByName = "alice", "Alice"
+		src[1] = sr
+		secrets := func(string) (string, error) { return "bobs-secret", nil }
+		res, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}},
+			map[string]any{}, RunOptions{Owner: "bob", Secrets: secrets, Watch: oneEvent})
+		if ok || len(res) != 1 || !strings.Contains(res[0].Error, "only their rules") {
+			t.Errorf("%s: ok=%v res=%+v", name, ok, res)
+		}
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("watch action ran %d times for another owner", hits.Load())
+	}
+}
+
+// savedWaitCalling is saved wait 1, last saved by waitOwner, whose on-match
+// action runs saved action 2 (sr).
+func savedWaitCalling(waitOwner string, sr rules.SavedRequest) fakeSaved {
+	sr.ID = 2
+	return fakeSaved{
+		1: {ID: 1, Name: "Wait", UpdatedBy: waitOwner, Request: rules.Action{Type: rules.ActionDelay, DelayMillis: 30,
+			Watch: &rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}, Actions: []rules.Action{{Type: rules.ActionRequest, RequestID: 2}}}}},
+		2: sr,
+	}
+}
+
+// A saved wait that calls a secret-using saved action carries that action's
+// secrets: it only runs for rules of the admin who saved both.
+func TestSavedWaitCallingSecretActionOwnerOnly(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	withSecret := rules.SavedRequest{Name: "Call", UpdatedBy: "alice", UpdatedByName: "Alice",
+		Request: rules.Action{Type: rules.ActionHTTP, Method: "GET", URL: srv.URL + `?k={{ secret "CAM_PASS" }}`}}
+	secrets := func(string) (string, error) { return "alices-secret", nil }
+	run := func(waitOwner string) ([]StepResult, bool) {
+		return savedRunner(savedWaitCalling(waitOwner, withSecret)).RunWith(context.Background(),
+			[]rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{},
+			RunOptions{Owner: "alice", Secrets: secrets, Watch: oneEvent})
+	}
+
+	// Bob saved the wait (before saves were checked); Alice's rule uses it.
+	res, ok := run("bob")
+	if ok || hits.Load() != 0 || len(res) != 1 || !strings.Contains(res[0].Error, "only their rules") {
+		t.Fatalf("bob's wait: ok=%v hits=%d res=%+v", ok, hits.Load(), res)
+	}
+	// Alice's own wait runs.
+	res, ok = run("alice")
+	if !ok || hits.Load() != 1 {
+		t.Fatalf("alice's wait: ok=%v hits=%d res=%+v", ok, hits.Load(), res)
+	}
+}
+
+// The check is repeated when the watch's action runs: here the called action
+// only starts using secrets after the wait has started.
+func TestSavedWaitCallingSecretActionRecheckedInWatch(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	src := savedWaitCalling("bob", rules.SavedRequest{Name: "Call", UpdatedBy: "alice", UpdatedByName: "Alice",
+		Request: rules.Action{Type: rules.ActionHTTP, Method: "GET", URL: srv.URL}})
+	// Subscribing happens after the wait has been resolved and checked.
+	watch := func(t rules.Trigger) (<-chan yoursix.Event, func()) {
+		sr := src[2]
+		sr.Request.URL = srv.URL + `?k={{ secret "CAM_PASS" }}`
+		src[2] = sr
+		return oneEvent(t)
+	}
+	secrets := func(string) (string, error) { return "alices-secret", nil }
+	res, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}},
+		map[string]any{}, RunOptions{Owner: "alice", Secrets: secrets, Watch: watch})
+	if ok || hits.Load() != 0 || len(res) != 1 || res[0].Watch == nil || len(res[0].Watch.Steps) != 1 {
+		t.Fatalf("ok=%v hits=%d res=%+v", ok, hits.Load(), res)
+	}
+	// It names the saved wait's owner as the reason: the rule's owner (Alice)
+	// may use the action, but the wait's owner chose its parameters.
+	want := `saved action "Call" uses secrets belonging to Alice, but saved wait "Wait" that runs it was last saved by another admin; only their own saved waits can run it`
+	if got := res[0].Watch.Steps[0].Error; got != want {
+		t.Fatalf("watch step error %q, want %q", got, want)
+	}
+}
+
+func TestSavedRequestAllActionsCoverWatch(t *testing.T) {
+	sr := rules.SavedRequest{Request: rules.Action{Type: rules.ActionDelay, DelayMillis: 10, Watch: &rules.Watch{
+		Actions:   []rules.Action{{Type: rules.ActionHTTP, URL: `{{ secret "A" }}`}},
+		IfNoMatch: []rules.Action{{Type: rules.ActionDiscord, Message: `{{ secret "B" }}`}},
+	}}}
+	refs, err := SecretRefs(sr.AllActions())
+	if err != nil || strings.Join(refs, ",") != "A,B" {
+		t.Fatalf("refs %v err %v", refs, err)
+	}
+	sr.Request.Watch.Actions[0].URL = "{{ .bad"
+	if err := CheckTemplates(sr.AllActions()); err == nil {
+		t.Fatal("bad watch action template accepted")
+	}
+	sr.Request.Watch.Actions[0] = rules.Action{Type: rules.ActionRequest, RequestID: 2, Params: map[string]string{"p": `{{ secret "A" }}`}}
+	if err := ForbiddenSecretRefs(sr.AllActions()); err == nil {
+		t.Fatal("secret in a watch action's parameters accepted")
+	}
+}
+
+func TestOnFailureWatchingSavedDelayFails(t *testing.T) {
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}, Stop: true})
+	subscribed := false
+	opts := RunOptions{InOnFailure: true, Watch: func(rules.Trigger) (<-chan yoursix.Event, func()) {
+		subscribed = true
+		return nil, func() {}
+	}}
+	res, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{}, opts)
+	want := `saved action "Wait" watches for events, which steps in "If something goes wrong" can't do`
+	if ok || subscribed || len(res) != 1 || res[0].Error != want {
+		t.Fatalf("ok=%v subscribed=%v res=%+v", ok, subscribed, res)
 	}
 }

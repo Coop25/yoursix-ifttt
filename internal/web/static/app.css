@@ -247,7 +247,9 @@ span.progress { display: inline-flex; align-items: center; gap: 4px; font-varian
 .pill.unknown > span::after { content: " ⚠"; color: var(--warn); }
 .picker-add { width: 100%; }
 .type-pick { max-width: 320px; margin-bottom: 10px; }
-.action-box.fixed { padding-top: 12px; }
+/* The saved action editor's single action: a step card without the header. */
+.action-box.fixed { padding: 12px 10px 10px; gap: 8px; background: var(--bg); }
+.action-box.fixed > .watch-box { margin-top: 2px; }
 .badge.type { color: var(--accent); }
 
 /* Phones: one column, a scrollable tab strip, full-screen editors, and an
@@ -416,3 +418,77 @@ pre.diff > span { display: block; padding: 0 10px; white-space: pre-wrap; overfl
 .w-sub .action-box, .w-nomatch .action-box { background: var(--panel); }
 .watch-detail { margin-top: 4px; padding-left: 8px; }
 @media (max-width: 640px) { .w-own { grid-template-columns: 1fr; } }
+
+.duration { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.duration input.dur { width: 64px; }
+.duration .dur-note:empty { display: none; }
+
+/* Condition rows: property and value boxes with a popup of suggestions. */
+.filter-row > * { min-width: 0; }
+.filter-row .ff-del { grid-column: 4; }
+.combo { position: relative; min-width: 0; }
+.combo > input { width: 100%; }
+.combo-list { position: absolute; z-index: 30; left: 0; right: 0; top: 100%; margin: 2px 0 0; padding: 4px 0; list-style: none; max-height: 240px; overflow-y: auto; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 6px 18px rgba(0, 0, 0, .25); }
+.combo-group { padding: 6px 10px 2px; font-size: 11.5px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+.combo-opt { padding: 7px 10px; cursor: pointer; overflow-wrap: anywhere; }
+.combo-opt:hover, .combo-opt[aria-selected=true] { background: var(--accent); color: var(--accent-text); }
+@media (max-width: 640px) { .filter-row .ff-del { grid-column: 1; justify-self: start; } }
+
+/* Rule editor: a header with the name and On/Off switch, then plain-English
+   sections; steps are cards that fold to a one-line summary. */
+.editor-head { display: grid; gap: 2px; margin-bottom: 4px; }
+.editor-kicker { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; overflow-wrap: anywhere; }
+.editor-top { display: flex; align-items: center; gap: 10px; }
+.editor-basics { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.rule-name { flex: 1; min-width: 0; font-size: 18px; font-weight: 600; padding: 6px 10px; }
+.switch { flex-direction: row; align-items: center; gap: 6px; font-weight: 600; cursor: pointer; flex: none; }
+.switch input { appearance: none; -webkit-appearance: none; position: relative; width: 40px; height: 22px; margin: 0; padding: 0; border-radius: 999px; border: 1px solid var(--border); background: var(--chip); cursor: pointer; transition: background-color .15s, border-color .15s; }
+.switch input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); transition: transform .15s, background-color .15s; }
+.switch input:checked { background: var(--ok); border-color: var(--ok); }
+.switch input:checked::after { transform: translateX(18px); background: #fff; }
+.switch input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.switch span { min-width: 2em; }
+@media (prefers-reduced-motion: reduce) { .switch input, .switch input::after { transition: none; } }
+
+/* Small disclosure menus ("⋯", "+ Add step"). */
+.menu { position: relative; }
+.menu > summary { list-style: none; cursor: pointer; user-select: none; }
+.menu > summary::-webkit-details-marker { display: none; }
+#editor-menu > summary { font-size: 16px; line-height: 1; padding: 6px 10px; }
+#editor-menu .menu-list { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 170px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 18px rgba(0, 0, 0, .25); }
+.add-menu { margin-top: 4px; }
+.add-menu[open] > summary { border-color: var(--accent); }
+.add-menu .menu-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.menu-item { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer; }
+.menu-item:hover, .menu-item:focus-visible { border-color: var(--accent); }
+
+.ed-section { border-top: 1px solid var(--border); padding: 4px 0 12px; }
+.ed-section > h3, .then-head h3 { margin: 12px 0 6px; }
+.ed-fold > summary { cursor: pointer; padding: 12px 0 8px; font-weight: 600; font-size: 15px; overflow-wrap: anywhere; }
+.ed-fold > summary .muted { font-weight: 400; }
+.ed-fold[open] > summary { margin-bottom: 4px; }
+#f-onfail-fold .add-menu { margin-bottom: 4px; }
+
+.steps { display: grid; gap: 8px; margin-bottom: 4px; }
+.steps .action-box, .w-actions .action-box, .w-nomatch .action-box { margin-bottom: 0; }
+.action-box:not(.fixed) { padding: 0; gap: 0; }
+.step-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 4px 8px 4px 4px; }
+.step-toggle { display: flex; align-items: center; gap: 8px; flex: 1 1 220px; min-width: 0; padding: 6px; border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.step-toggle:hover { background: color-mix(in srgb, var(--chip) 60%, transparent); }
+.step-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.step-chevron::before { content: "▸"; display: inline-block; color: var(--muted); transition: transform .15s; }
+.action-box[data-open="true"] > .step-head .step-chevron::before { transform: rotate(90deg); }
+.step-num { flex: none; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 999px; background: var(--chip); color: var(--text); font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
+.step-summary { min-width: 0; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.step-tools { display: flex; gap: 4px; margin-left: auto; }
+.step-tools .btn.small { min-width: 30px; padding: 3px 8px; }
+.action-body { display: grid; gap: 8px; padding: 4px 10px 10px; border-top: 1px solid var(--border); padding-top: 10px; }
+.action-box.has-error { border-color: var(--bad); box-shadow: 0 0 0 1px var(--bad) inset; }
+@media (prefers-reduced-motion: reduce) { .step-chevron::before { transition: none; } }
+@media (max-width: 640px) {
+  .editor-top { gap: 6px; }
+  .editor-basics { gap: 6px; }
+  .rule-name { font-size: 17px; }
+  .step-toggle { flex-basis: 100%; }
+  .step-tools .btn.small { padding: 4px 10px; }
+}

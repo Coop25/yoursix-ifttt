@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -196,3 +197,81 @@ func TestSessionRoundTrip(t *testing.T) {
 }
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
+func TestCatalogFieldsEndpoint(t *testing.T) {
+	srv, st := newTestServer(t, true)
+	ev := yoursix.Sample("device", "vmd")
+	raw, _ := json.Marshal(ev)
+	if _, _, err := st.InsertEvent(t.Context(), ev, raw, "1.2.3.4", false); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(srv.URL + "/api/catalog/fields?topics=device&codes=vmd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var got struct {
+		Fields []store.FieldStat `json:"fields"`
+		Known  []string          `json:"known"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Fields) == 0 || len(got.Known) == 0 {
+		t.Fatalf("fields %d known %d", len(got.Fields), len(got.Known))
+	}
+	seen := map[string]bool{}
+	for _, f := range got.Fields {
+		seen[f.Name] = true
+	}
+	if !seen["deviceName"] {
+		t.Fatal("deviceName missing from fields")
+	}
+	for _, k := range got.Known {
+		if seen[k] {
+			t.Fatalf("known repeats %q", k)
+		}
+	}
+}
+
+func TestCatalogFieldsCapsTopicsAndCodes(t *testing.T) {
+	srv, st := newTestServer(t, true)
+	ev := yoursix.Sample("device", "vmd")
+	raw, _ := json.Marshal(ev)
+	if _, _, err := st.InsertEvent(t.Context(), ev, raw, "1.2.3.4", false); err != nil {
+		t.Fatal(err)
+	}
+	fieldsFor := func(query string) int {
+		t.Helper()
+		resp, err := http.Get(srv.URL + "/api/catalog/fields?" + query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var got struct {
+			Fields []store.FieldStat `json:"fields"`
+		}
+		if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&got) != nil {
+			t.Fatalf("%s: status %d", query, resp.StatusCode)
+		}
+		return len(got.Fields)
+	}
+	// Only the first 50 of each are used, so a 51st that would match is ignored.
+	var codes, topics []string
+	for i := range 50 {
+		codes = append(codes, "c"+strconv.Itoa(i))
+		topics = append(topics, "t"+strconv.Itoa(i))
+	}
+	if n := fieldsFor("codes=" + strings.Join(append(codes, "vmd"), ",")); n != 0 {
+		t.Errorf("51st code used: %d fields", n)
+	}
+	if n := fieldsFor("topics=" + strings.Join(append(topics, "device"), ",")); n != 0 {
+		t.Errorf("51st topic used: %d fields", n)
+	}
+	if n := fieldsFor("codes=" + strings.Join(append(codes[:49], "vmd"), ",")); n == 0 {
+		t.Error("50th code ignored")
+	}
+}

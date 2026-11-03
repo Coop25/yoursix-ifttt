@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,11 @@ import (
 // it uses secrets it belongs to that admin (see actions.runSavedRequest).
 func (s *Server) checkRequestActions(r *http.Request, editorID string, acts []rules.Action) error {
 	for i, a := range acts {
+		if a.Type == rules.ActionDelay && a.Watch != nil {
+			if err := s.checkNestedWatch(r.Context(), a.Watch); err != nil {
+				return &rules.ActionError{Index: i, Err: err}
+			}
+		}
 		if a.Type != rules.ActionRequest {
 			continue
 		}
@@ -27,12 +33,12 @@ func (s *Server) checkRequestActions(r *http.Request, editorID string, acts []ru
 		if err != nil {
 			return err
 		}
-		refs, err := actions.SecretRefs([]rules.Action{sr.Request})
+		refs, err := actions.SavedSecretRefs(r.Context(), s.store, sr)
 		if err != nil {
 			return &rules.ActionError{Index: i, Err: err}
 		}
 		if len(refs) > 0 && sr.UpdatedBy != editorID {
-			return &rules.ActionError{Index: i, Err: fmt.Errorf("saved action %q uses secrets belonging to %s, so only their rules can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))}
+			return &rules.ActionError{Index: i, Err: fmt.Errorf("saved action %q uses secrets belonging to %s, so only their rules and saved actions can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))}
 		}
 		// Templated values count as provided; only presence is checked here.
 		present := make(map[string]string, len(a.Params))
@@ -81,11 +87,18 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // requestEditor checks the secrets a saved request uses belong to the admin
-// saving it (who becomes its owner), like rules.
+// saving it (who becomes its owner), like rules, including those of saved
+// actions its watch runs.
 func (s *Server) requestEditor(w http.ResponseWriter, r *http.Request, sr rules.SavedRequest) (store.Editor, bool) {
 	u := userFrom(r.Context())
-	if err := s.secrets.CheckRule(r.Context(), u.ID, []rules.Action{sr.Request}); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := s.secrets.CheckRule(r.Context(), u.ID, sr.AllActions()); err != nil {
+		writeError(w, http.StatusBadRequest, sr.Relabel(err).Error())
+		return store.Editor{}, false
+	}
+	// This also rejects a watch that runs another watching saved delay
+	// (checkNestedWatch, for the saved delay itself at index 0).
+	if err := s.checkRequestActions(r, u.ID, sr.AllActions()); err != nil {
+		writeError(w, http.StatusBadRequest, sr.Relabel(err).Error())
 		return store.Editor{}, false
 	}
 	return editorFor(u), true
@@ -123,6 +136,12 @@ func (s *Server) handleUpdateRequest(w http.ResponseWriter, r *http.Request) {
 	by, ok := s.requestEditor(w, r, sr)
 	if !ok {
 		return
+	}
+	if sr.Request.Watch != nil {
+		if err := s.checkStartsWatching(r.Context(), id, sr.Request.Watch); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	updated, err := s.store.UpdateRequest(r.Context(), sr, by)
 	if err != nil {
@@ -184,10 +203,104 @@ func (s *Server) handleTestRequest(w http.ResponseWriter, r *http.Request) {
 	ev := yoursix.Sample(yoursix.TopicDevice, "vmd")
 	ev.EventID = ""
 	raw, _ := json.Marshal(ev)
-	run, err := s.engine.StartTestRun(r.Context(), rule, ev, raw, "test:"+u.Username)
+	run, err := s.engine.StartSavedActionTestRun(r.Context(), rule, ev, raw, "test:"+u.Username)
 	if err != nil {
 		s.storeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"run": run, "event": ev})
+}
+
+// checkNestedWatch rejects a watch whose actions call a saved delay that
+// itself watches: only one delay may be watching at a time, so such a call
+// could never run.
+func (s *Server) checkNestedWatch(ctx context.Context, w *rules.Watch) error {
+	lists := []struct {
+		label string
+		acts  []rules.Action
+	}{{"on-match", w.Actions}, {"if-no-match", w.IfNoMatch}}
+	for _, l := range lists {
+		for i, a := range l.acts {
+			if a.Type != rules.ActionRequest {
+				continue
+			}
+			sr, err := s.store.SavedRequest(ctx, a.RequestID)
+			if errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("watch: %s action %d: saved action #%d doesn't exist", l.label, i+1, a.RequestID)
+			}
+			if err != nil {
+				return err
+			}
+			if sr.Request.Watch != nil {
+				return fmt.Errorf("watch: %s action %d: saved action %q watches for events, so it can't run while another delay is watching", l.label, i+1, sr.Name)
+			}
+		}
+	}
+	return nil
+}
+
+// checkStartsWatching rejects giving saved action id a watch while it is run
+// where a watching wait can't run: by another delay's watch (in a rule or a
+// saved wait) or by a rule's on-failure steps. Saving those callers checks
+// the same thing (checkNestedWatch, checkOnFailureWatch); this covers the
+// saved action changing under them. own is the saved action's new watch,
+// which can't run the saved action itself either.
+func (s *Server) checkStartsWatching(ctx context.Context, id int64, own *rules.Watch) error {
+	calls := func(acts []rules.Action) bool {
+		for _, a := range acts {
+			if a.Type == rules.ActionRequest && a.RequestID == id {
+				return true
+			}
+		}
+		return false
+	}
+	watchCalls := func(w *rules.Watch) bool { return w != nil && (calls(w.Actions) || calls(w.IfNoMatch)) }
+	if watchCalls(own) {
+		return errors.New("watch: its actions can't run this saved action itself, since it watches for events")
+	}
+	all, err := s.store.ListRules(ctx)
+	if err != nil {
+		return err
+	}
+	for _, rv := range all {
+		if calls(rv.OnFailure) {
+			return fmt.Errorf("rule %q runs this in \"If something goes wrong\", where a wait can't watch for events; remove it there first", rv.Name)
+		}
+		for _, a := range rv.Actions {
+			if watchCalls(a.Watch) {
+				return fmt.Errorf("rule %q runs this while another delay is watching, where it can't watch for events itself; remove it there first", rv.Name)
+			}
+		}
+	}
+	saved, err := s.store.ListRequests(ctx)
+	if err != nil {
+		return err
+	}
+	for _, other := range saved {
+		if other.ID != id && watchCalls(other.Request.Watch) {
+			return fmt.Errorf("saved wait %q runs this while it is watching, where it can't watch for events itself; remove it there first", other.Name)
+		}
+	}
+	return nil
+}
+
+// checkOnFailureWatch rejects on-failure steps that run a saved delay that
+// watches for events: on-failure steps can't watch.
+func (s *Server) checkOnFailureWatch(ctx context.Context, onFailure []rules.Action) error {
+	for i, a := range onFailure {
+		if a.Type != rules.ActionRequest {
+			continue
+		}
+		sr, err := s.store.SavedRequest(ctx, a.RequestID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue // checkRequestActions reports it
+		}
+		if err != nil {
+			return err
+		}
+		if sr.Request.Watch != nil {
+			return fmt.Errorf("on-failure action %d: %w", i+1, actions.OnFailureWatchError(sr.Name))
+		}
+	}
+	return nil
 }

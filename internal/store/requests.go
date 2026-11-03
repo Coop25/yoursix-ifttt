@@ -6,22 +6,30 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"yoursix-ifttt/internal/actions"
 	"yoursix-ifttt/internal/rules"
 )
 
-// RequestView adds the rules that use a saved request, for the UI.
+// RequestView adds the rules (and saved waits) that use a saved request, for
+// the UI.
 type RequestView struct {
 	rules.SavedRequest
 	UsedBy []RuleRef `json:"usedBy"`
 }
 
+// RuleRef names a rule, or with Kind "action" a saved action (a saved wait
+// whose watch runs the saved request).
 type RuleRef struct {
 	ID   int64  `json:"id"`
 	Name string `json:"name"`
+	Kind string `json:"kind,omitempty"`
 }
+
+// RefKindAction marks a RuleRef that names a saved action.
+const RefKindAction = "action"
 
 const requestCols = `id, name, description, params_json, request_json, updated_by, updated_by_name, created_at, updated_at`
 
@@ -107,31 +115,48 @@ func (s *Store) GetRequest(ctx context.Context, id int64) (RequestView, error) {
 	return RequestView{SavedRequest: sr, UsedBy: used}, nil
 }
 
-// requestUsers maps saved-request IDs to the rules whose actions use them.
+// requestUsers maps saved-request IDs to the rules whose actions use them,
+// and the saved waits whose watch runs them.
 func requestUsers(ctx context.Context, q querier) (map[int64][]RuleRef, error) {
 	all, err := listRules(ctx, q)
 	if err != nil {
 		return nil, err
 	}
 	out := map[int64][]RuleRef{}
-	for _, r := range all {
+	addUses := func(acts []rules.Action, ref RuleRef) {
 		seen := map[int64]bool{}
-		for _, a := range r.AllActions() {
+		for _, a := range acts {
 			if a.Type == rules.ActionRequest && !seen[a.RequestID] {
 				seen[a.RequestID] = true
-				out[a.RequestID] = append(out[a.RequestID], RuleRef{ID: r.ID, Name: r.Name})
+				out[a.RequestID] = append(out[a.RequestID], ref)
 			}
 		}
 	}
-	return out, nil
+	for _, r := range all {
+		addUses(r.AllActions(), RuleRef{ID: r.ID, Name: r.Name})
+	}
+	rows, err := q.QueryContext(ctx, `SELECT `+requestCols+` FROM requests WHERE request_json LIKE '%"watch"%' ORDER BY name COLLATE NOCASE`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		sr, err := scanRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		// AllActions()[0] is the saved action itself, never a request.
+		addUses(sr.AllActions()[1:], RuleRef{ID: sr.ID, Name: sr.Name, Kind: RefKindAction})
+	}
+	return out, rows.Err()
 }
 
 func prepareRequest(sr *rules.SavedRequest) (params, req []byte, err error) {
 	if err := sr.Validate(); err != nil {
 		return nil, nil, ValidationError{err}
 	}
-	if err := actions.CheckTemplates([]rules.Action{sr.Request}); err != nil {
-		return nil, nil, ValidationError{err}
+	if err := actions.CheckTemplates(sr.AllActions()); err != nil {
+		return nil, nil, ValidationError{sr.Relabel(err)}
 	}
 	if params, err = json.Marshal(sr.Params); err != nil {
 		return nil, nil, err
@@ -206,11 +231,22 @@ func (s *Store) UpdateRequest(ctx context.Context, sr rules.SavedRequest, by Edi
 type ErrInUse struct{ Rules []RuleRef }
 
 func (e ErrInUse) Error() string {
-	names := make([]string, len(e.Rules))
-	for i, r := range e.Rules {
-		names[i] = r.Name
+	var ruleNames, actionNames []string
+	for _, r := range e.Rules {
+		if r.Kind == RefKindAction {
+			actionNames = append(actionNames, r.Name)
+		} else {
+			ruleNames = append(ruleNames, r.Name)
+		}
 	}
-	return fmt.Sprintf("still used by %d rule(s): %v; remove it from them first", len(e.Rules), names)
+	var parts []string
+	if len(ruleNames) > 0 {
+		parts = append(parts, fmt.Sprintf("%d rule(s): %v", len(ruleNames), ruleNames))
+	}
+	if len(actionNames) > 0 {
+		parts = append(parts, fmt.Sprintf("%d saved wait(s): %v", len(actionNames), actionNames))
+	}
+	return fmt.Sprintf("still used by %s; remove it from them first", strings.Join(parts, " and "))
 }
 
 // DeleteRequest refuses (ErrInUse) while rules still use the saved action.

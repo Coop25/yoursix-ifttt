@@ -68,6 +68,7 @@ func (s *Server) Handler() http.Handler {
 	admin := s.requireRole(RoleAdmin)
 	mux.Handle("GET /api/me", view(s.handleMe))
 	mux.Handle("GET /api/catalog", view(s.handleCatalog))
+	mux.Handle("GET /api/catalog/fields", view(s.handleCatalogFields))
 	mux.Handle("GET /api/info", admin(s.handleInfo))
 	mux.Handle("GET /api/rules", view(s.handleListRules))
 	mux.Handle("POST /api/rules", admin(s.handleCreateRule))

@@ -41,8 +41,16 @@
       $("#f-preview-on").checked = true;
       const rule = state.rules.find((r) => r.name.startsWith("Front door"));
       rule.scheduleId = state.schedules.find((s) => s.name === "Weeknights")?.id;
+      // A Wait that watches for the door opening again, so the editor shows
+      // a condition, collapsed steps and one open step with its watch.
+      rule.actions = rule.actions.map((a) => (a.type === "delay"
+        ? { ...a, name: "Keep it on", delayMillis: 120000, watch: { sameAsTrigger: true, restart: true, maxMillis: 600000 } }
+        : a));
       await openEditor(rule);
       await wait(800);
+      const wait1 = $$("#f-actions > .action-box").find((b) => b.dataset.type === "delay");
+      if (wait1) setStepOpen(wait1, true);
+      await wait(300);
     },
     async actions() {
       showTab("requests");

@@ -57,9 +57,6 @@ func (s *SavedRequest) Validate() error {
 	}
 	// The rule using it supplies the label and error handling.
 	s.Request.Name, s.Request.ContinueOnError = "", false
-	if s.Request.Watch != nil {
-		return errors.New("a saved delay can't watch for events; add the watch to a delay in the rule")
-	}
 	if err := s.Request.validate(); err != nil {
 		return err
 	}
@@ -105,4 +102,39 @@ func (s SavedRequest) ResolveParams(given map[string]string) (map[string]string,
 		}
 	}
 	return out, nil
+}
+
+// AllActions is the saved action followed by the actions its watch runs, for
+// checks that apply to all of them (templates, secrets).
+func (s SavedRequest) AllActions() []Action {
+	out := []Action{s.Request}
+	if w := s.Request.Watch; w != nil {
+		out = append(append(out, w.Actions...), w.IfNoMatch...)
+	}
+	return out
+}
+
+// Relabel rewrites an ActionError about s.AllActions(): one about the saved
+// action itself (index 0) loses its "action 1" label, since a saved action
+// has only one, and one about the watch's actions names it, e.g. "watch
+// action 1". Other errors are returned as they are.
+func (s SavedRequest) Relabel(err error) error {
+	var ae *ActionError
+	if !errors.As(err, &ae) {
+		return err
+	}
+	if ae.Index == 0 {
+		return ae.Err
+	}
+	w := s.Request.Watch
+	if w == nil {
+		return err
+	}
+	if i := ae.Index - 1; i < len(w.Actions) {
+		return fmt.Errorf("watch action %d: %w", i+1, ae.Err)
+	}
+	if i := ae.Index - 1 - len(w.Actions); i < len(w.IfNoMatch) {
+		return fmt.Errorf("if-no-match action %d: %w", i+1, ae.Err)
+	}
+	return err
 }

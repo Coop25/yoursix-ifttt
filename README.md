@@ -22,14 +22,14 @@ A small Go service that receives [YourSix event webhooks](https://docs.yoursix.c
   <img alt="Event log searched for device:CAM-01, with a failed run expanded: the first step's connection error, the skipped steps, and the If anything fails alert that ran" src="docs/screenshots/events-light.png">
 </picture>
 
-**Rule editor.** Click a rule to open it. Pick topics and event codes from dropdowns (each choice shows as a removable pill), add filters, choose when to ignore events and which schedule it runs during, and build the action list from HTTP requests, delays, Discord messages and saved actions. **Preview templates** shows what each URL, header, body and message renders to. You can also switch to raw JSON.
+**Rule editor.** Click a rule to open it. The editor reads as plain-English sections: **When this happens** (topics and event codes as removable pills, plus **Only if…** conditions), **Do these steps, in order** (each step is a card you can open and close, move, duplicate or remove; add HTTP requests, waits, Discord messages and saved actions), **If something goes wrong**, and **Limits and schedule** (cooldown, one-at-a-time, ignore windows and the schedule; folded away until you need it). A condition picks a property from a list of recent events (or lets you type your own), an operator in plain English (*is*, *is not*, *contains*, *starts with*, *exists*, *doesn't exist*, *matches pattern*) and a value suggested from what those events contained. Waits and cooldowns are entered in hours, minutes and seconds. **Preview templates** shows what each URL, header, body and message renders to. **Edit as JSON** in the ⋯ menu switches to the raw rule.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/editor-dark.png">
-  <img alt="Rule editor with a schedule picked, topic and event code pills, a filter, and a saved action whose template preview shows the rendered URL, a masked secret and the body" src="docs/screenshots/editor-light.png">
+  <img alt="Rule editor with topic and event code pills, a condition, and three step cards: the second, a Wait that watches for events, is open" src="docs/screenshots/editor-light.png">
 </picture>
 
-**Saved actions.** Set up an HTTP request, delay or Discord message once, with parameters, and reuse it from any rule.
+**Saved actions.** Set up an HTTP request, wait or Discord message once, with parameters, and reuse it from any rule. A saved wait can watch for events too.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/actions-dark.png">
@@ -81,20 +81,20 @@ A rule has an **If** part, a list of **Then** actions, and an optional cooldown.
 **If:**
 - **Topics** (`device`, `alarmgroup`, `barrier`, `peripheral`, `sensor`). Empty means any topic.
 - **Event codes** (`vmd`, `aoa`, `input_activated`, …), either bare or qualified like `device:vmd`. Empty means any code.
-- **Filters** on any `eventData` key (`deviceName`, `siteName`, `groupState`, `videoSourceId`, …) or top-level field (`eventCode`, …), using `equals`, `not_equals`, `contains`, `starts_with`, `regex`, `exists` or `not_exists`. Every filter must match.
+- **Conditions** (`"filters"` in JSON) on any `eventData` key (`deviceName`, `siteName`, `groupState`, `videoSourceId`, …) or top-level field (`eventCode`, …), using `equals`, `not_equals`, `contains`, `starts_with`, `regex`, `exists` or `not_exists`. Every condition must match. In the editor the property picker suggests properties seen in recent events (`GET /api/catalog/fields`), and the value box suggests values for the chosen property; you can always type your own.
 
 **Then**, run in order:
 
 | Type | What it does |
 |---|---|
 | `http` | Any method, URL, headers and body. Auth can be none, `basic`, or `digest` (Axis VAPIX default). Optional self-signed TLS, custom expected status codes, and a timeout. |
-| `delay` | Waits N ms between steps. It can also [watch for events while it waits](#watching-for-events-during-a-delay). |
+| `delay` | A **Wait** between steps (`delayMillis`, up to 10 minutes; the editor takes hours, minutes and seconds). It can also [watch for events while it waits](#watching-for-events-during-a-delay). |
 | `discord` | Posts a message and/or rich embeds to a Discord webhook (see below). |
 | `request` | Runs a **saved action** (see below) with values for its parameters. |
 
 By default a failing action stops the rule. Set `continueOnError` on an action to keep going after it fails.
 
-**If anything fails** (`"onFailure": [...]`): actions to run after a step fails, e.g. a Discord alert or a saved action. They run once, after the rule's own actions, and only for a failure that stopped the rule: a step set to continue on error that fails doesn't trigger them. Their templates also see `{{ .failure.step }}` (the failed step's name), `{{ .failure.stepNumber }}` and `{{ .failure.error }}`. Their results appear in the run under *If anything fails*; the run still counts as failed.
+**If something goes wrong** (`"onFailure": [...]`): actions to run after a step fails, e.g. a Discord alert or a saved action. They run once, after the rule's own actions, and only for a failure that stopped the rule: a step set to continue on error that fails doesn't trigger them. Their templates also see `{{ .failure.step }}` (the failed step's name), `{{ .failure.stepNumber }}` and `{{ .failure.error }}`. Their results appear in the run under *If anything fails*; the run still counts as failed.
 
 **Discord options.** Besides the message, a `discord` action can set:
 
@@ -116,7 +116,7 @@ While a rule runs, the UI shows it live:
 
 - The rule's card on the **Rules** tab is highlighted and reads, e.g., *Step 2 of 4 · Settle · 4.2s left*. Its finished steps are ticked and the current one is marked.
 - The event's badge in the **Events** log shows, e.g., *2/4 · 4.2s*.
-- **Delay** steps count down with a progress bar; other steps show elapsed time.
+- **Wait** steps count down with a progress bar; other steps show elapsed time.
 
 URL, body, header values, password and message are Go templates:
 
@@ -128,19 +128,19 @@ URL, body, header values, password and message are Go templates:
 {{ secret "CAMERA_PASS" }}         -> your secret CAMERA_PASS (Secrets tab)
 ```
 
-Rules can be edited in the form editor or as raw JSON (toggle in the editor). See [testdata/rules/motion-to-mock-camera.json](testdata/rules/motion-to-mock-camera.json) for an example.
+Rules can be edited in the form editor or as raw JSON (**Edit as JSON** in the editor's ⋯ menu). See [testdata/rules/motion-to-mock-camera.json](testdata/rules/motion-to-mock-camera.json) for an example.
 
-**Preview templates** (a tick box above the actions) renders every URL, header, body and message as you type, against a sample event for the rule's trigger. Saved actions show their parameters and the values they produce. Secrets appear as `‹secret NAME›`; their values are never sent to the browser. Broken templates show their error in place.
+**Preview templates** (a tick box above the steps) renders every URL, header, body and message as you type, against a sample event for the rule's trigger. Saved actions show their parameters and the values they produce. Secrets appear as `‹secret NAME›`; their values are never sent to the browser. Broken templates show their error in place.
 
 **Edit conflicts.** If someone else saves a rule or saved action while you have it open, your save is refused instead of silently overwriting theirs. You can see what they changed, overwrite with your version, or load theirs. API clients opt in by sending the `updatedAt` they loaded; without it there's no check.
 
 ### Watching for events during a delay
 
-A delay in a rule's actions can react to events that arrive while it waits. Tick **While waiting, watch for events** on the delay (`"watch"` in JSON) and choose:
+A wait in a rule's actions, or a saved wait (see below), can react to events that arrive while it waits. Tick **While waiting, watch for events** on the wait (`"watch"` in JSON) and choose:
 
 - **Which events:** the rule's own trigger (**Same events as this rule's trigger**), or other topics and codes. Filters narrow it down either way, and their values are templates filled in from the event that started the run. So `deviceName equals {{ .data.deviceName }}` means *the same camera*. In a `regex` filter, use `{{ regexquote .data.deviceName }}` so a name like `Cam (1)` matches literally; a regex that's invalid once filled in fails the step.
 - **When one arrives**, any of:
-  - **Restart the countdown**, up to a longest wait (at most 1 hour) counted from when the delay began. For example: motion turns a light on, a 5-minute delay keeps it on, and more motion restarts the 5 minutes, so the light only goes off once things are quiet.
+  - **Keep waiting up to … in total**: restart the countdown on each match, up to a longest wait (entered in hours, minutes and seconds; at most 1 hour) counted from when the delay began. For example: motion turns a light on, a 5-minute delay keeps it on, and more motion restarts the 5 minutes, so the light only goes off once things are quiet.
   - **Run actions**: on the first match, or on every match. For example: the gate opened, and motion on the back camera within 30 seconds posts an alert.
   - **Stop the rule**: skip the rule's remaining steps, for example when a "door closed" event means the alert isn't needed. The run still counts as successful.
 - **If nothing arrives** (optional): actions to run when the wait ends without a single match. For example: the gate opened and nobody badged in within 60 seconds.
@@ -150,9 +150,9 @@ Actions run by a watch, and the rule's later steps, see what happened as `{{ .wa
 Things to know:
 
 - **Events still match rules as usual.** A watch doesn't swallow events. For a keep-alive rule like the light above, turn on **Ignore while running** so its own motion events restart the countdown instead of starting a second run. They're logged as `busy`.
-- **A failing watch action doesn't interrupt anything.** It's recorded and the run counts as failed, but the wait and the rest of the rule carry on and **If anything fails** doesn't run, as if the action were set to continue on error.
+- **A failing watch action doesn't interrupt anything.** It's recorded and the run counts as failed, but the wait and the rest of the rule carry on and **If something goes wrong** doesn't run, as if the action were set to continue on error.
 - **Test events count.** Events from the Setup tab's simulator reach watches like real ones. Running a rule with its **Test** button doesn't send an event, so it doesn't reach other runs' watches.
-- Only a rule's own delays can watch: not saved delays, on-failure actions, or actions run by another watch. A run that is watching takes up one of the 16 run slots until it finishes, the same as any other delay.
+- Rules' own waits and saved waits can watch, but not steps in **If something goes wrong** or actions run by another watch. A saved wait that watches can't be used in either place: that's rejected when you save, and fails the step if it happens anyway. A run that is watching takes up one of the 16 run slots until it finishes, the same as any other delay.
 - The run log shows each watched delay's matches and restarts, and the results of its actions grouped by the match that ran them. While it runs, the Rules tab shows something like *Step 1 of 2 · Keep it on · 4:12 left · 3 matches, restarted 3×*.
 
 ```json
@@ -167,11 +167,13 @@ Things to know:
 
 The **Saved actions** tab holds reusable actions, so the same camera call or Discord webhook doesn't have to be copied into every rule. Each one has a name, an action (an HTTP request, a delay, or a Discord message with all its options), and optional **parameters**. Its templates use parameters as `{{ .params.NAME }}`, alongside the usual event data. (In the API and in rule JSON they're still called requests: `/api/requests`, and `"type": "request"` with a `requestId`.)
 
-Rules use one with the **+ Saved action** button. Pick the saved action, then fill in its parameters; values can use event data, e.g. `preset = {{ .data.deviceName }}-view`. A parameter with a default is optional, and one without a default is required. Editing a saved action updates every rule that uses it. A saved action can't be deleted while rules still use it. Each one has its own **Test** button, which asks for parameter values first.
+Rules use one with **+ Add step → Saved action**. Pick the saved action, then fill in its parameters; values can use event data, e.g. `preset = {{ .data.deviceName }}-view`. A parameter with a default is optional, and one without a default is required. Editing a saved action updates every rule that uses it. A saved action can't be deleted while rules still use it. Each one has its own **Test** button, which asks for parameter values first.
+
+**Saved waits can watch.** A saved wait has the same **While waiting, watch for events** options as a rule's own wait. Its **Same events as the rule that uses this action** option uses the trigger of whichever rule runs it. Testing a saved wait on its own has no rule, so with that option nothing can match; the result says so (`watch.note`). A saved wait that watches for chosen topics and codes reacts to them during its test like any other run.
 
 **Saved actions and secrets.** Parameters can change where an action goes, for example a `host` parameter in a URL. So:
 
-- A saved action that uses secrets runs with the secrets of the admin who last saved it, and **only that admin's rules can use it**. This is checked when a rule is saved and again on every run.
+- A saved action that uses secrets runs with the secrets of the admin who last saved it, and **only that admin's rules and saved waits can use it**. A saved wait whose watch runs it uses those secrets too. This is checked when a rule or saved action is saved and again on every run.
 - Saved actions without secrets can be used by anyone.
 - Parameter values can't use `{{ secret }}`. Put the secret in the saved action itself.
 

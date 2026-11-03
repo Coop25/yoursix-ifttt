@@ -30,7 +30,7 @@ func TestWatchValidation(t *testing.T) {
 		{"nothing to do", Rule{Actions: []Action{delay(&Watch{Trigger: codes})}}, "choose what happens"},
 		{"restart without limit", Rule{Actions: []Action{delay(&Watch{Trigger: codes, Restart: true})}}, "longest wait"},
 		{"limit under delay", Rule{Actions: []Action{delay(&Watch{Trigger: codes, Restart: true, MaxMillis: 500})}}, "at least the delay (1 s)"},
-		{"limit over an hour", Rule{Actions: []Action{delay(&Watch{Trigger: codes, Restart: true, MaxMillis: MaxWatchMillis + 1})}}, "longest wait"},
+		{"limit over an hour", Rule{Actions: []Action{delay(&Watch{Trigger: codes, Restart: true, MaxMillis: MaxWatchMillis + 1})}}, "longest wait must be at least the delay (1 s) and at most 1 hour"},
 		{"not a delay", Rule{Actions: []Action{{Type: ActionDiscord, Message: "x", Watch: &Watch{Trigger: codes, Stop: true}}}}, "only delays"},
 		{"on failure", Rule{Actions: notify, OnFailure: []Action{delay(&Watch{Trigger: codes, Stop: true})}}, "on-failure action 1"},
 		{"nested watch", Rule{Actions: []Action{delay(&Watch{Trigger: codes,
@@ -97,10 +97,14 @@ func TestAllActionsIncludesWatchActions(t *testing.T) {
 	}
 }
 
-func TestSavedDelayCantWatch(t *testing.T) {
+func TestSavedDelayCanWatch(t *testing.T) {
 	sr := SavedRequest{Name: "x", Request: Action{Type: ActionDelay, DelayMillis: 5, Watch: &Watch{Trigger: Trigger{Codes: []string{"vmd"}}, Stop: true}}}
-	if err := sr.Validate(); err == nil || !strings.Contains(err.Error(), "saved delay") {
-		t.Fatalf("err = %v", err)
+	if err := sr.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	topics := sr.Request.Watch.Trigger.Topics
+	if topics == nil || len(topics) != 0 {
+		t.Fatalf("topics = %#v, want empty non-nil", topics)
 	}
 }
 
@@ -130,5 +134,13 @@ func TestRelabel(t *testing.T) {
 	}
 	if got := r.Relabel(errors.New("other")).Error(); got != "other" {
 		t.Errorf("plain error: %q", got)
+	}
+}
+
+func TestFmtSpan(t *testing.T) {
+	for ms, want := range map[int]string{0: "0 s", 1500: "1.5 s", 45000: "45 s", 300000: "5 m", 5400000: "1 h 30 m", 3600000: "1 h", 90000: "1 m 30 s"} {
+		if got := fmtSpan(ms); got != want {
+			t.Errorf("fmtSpan(%d) = %q, want %q", ms, got, want)
+		}
 	}
 }

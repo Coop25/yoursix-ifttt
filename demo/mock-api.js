@@ -401,7 +401,11 @@
       }
       return { ...f, value };
     });
-    const t = w.sameAsTrigger
+    // Like actions.watchedDelay: a saved action tested without a rule has no
+    // trigger to compare against, so nothing can match.
+    const nothing = w.sameAsTrigger && rule.noRule;
+    if (nothing) out.note = "nothing to compare against: this action is being tested without a rule";
+    const t = nothing ? { topics: [], codes: [], filters: [] } : w.sameAsTrigger
       ? { topics: rule.trigger.topics, codes: rule.trigger.codes, filters: [...(rule.trigger.filters || []), ...own] }
       : { topics: w.trigger?.topics || [], codes: w.trigger?.codes || [], filters: own };
     const queue = [];
@@ -413,7 +417,7 @@
       if (!(await runList(null, inner, acts, data, 0))) failed = true;
       out.steps = (out.steps || []).concat(inner.steps.map((s) => ({ ...s, match })));
     };
-    S.watchers.add(sub);
+    if (!nothing) S.watchers.add(sub);
     try {
       for (;;) {
         if (!queue.length) {
@@ -473,7 +477,20 @@
           for (const [k, v] of Object.entries(a.params || {})) if (v !== "") params[k] = render(v, data);
           const need = sr.params.find((p) => !p.default && !params[p.name]);
           if (need) throw new Error(`saved action "${sr.name}" needs a value for "${need.name}"`);
-          await runStep(sr.request, { ...data, params }, res);
+          if (sr.request.type === "delay" && sr.request.watch) {
+            // On-failure steps can't watch, and watch actions can't run
+            // another watching delay (one at a time).
+            if (onFailure) throw new Error(onFailureWatchError(sr.name));
+            if (!rule) throw new Error(`saved action "${sr.name}" watches for events, so it can't run while another delay is watching`);
+            const withParams = { ...data, params };
+            const { stop, failed } = await watchedDelay(e, run, sr.request, withParams, res, rule);
+            // Like the server, the rule's later steps see .watch too.
+            if ("watch" in withParams) data.watch = withParams.watch;
+            if (failed) ok = false;
+            if (stop) stopped = true;
+          } else {
+            await runStep(sr.request, { ...data, params }, res);
+          }
         } else {
           await runStep(a, data, res);
         }
@@ -597,7 +614,14 @@
     return v;
   }
   function requestView(sr) {
-    return { ...clone(sr), usedBy: S.rules.filter((r) => r.actions.some((a) => a.type === "request" && a.requestId === sr.id)).map((r) => ({ id: r.id, name: r.name })) };
+    // Like store.requestUsers: rules (any step, including watch and
+    // on-failure steps) and saved waits whose watch runs it.
+    const calls = (acts) => (acts || []).some((a) => a.type === "request" && a.requestId === sr.id);
+    const watchCalls = (w) => !!w && (calls(w.actions) || calls(w.ifNoMatch));
+    const byRules = S.rules.filter((r) => calls(r.actions) || calls(r.onFailure) || r.actions.some((a) => watchCalls(a.watch)))
+      .map((r) => ({ id: r.id, name: r.name }));
+    const byWaits = S.requests.filter((x) => watchCalls(x.request.watch)).map((x) => ({ id: x.id, name: x.name, kind: "action" }));
+    return { ...clone(sr), usedBy: [...byRules, ...byWaits] };
   }
   function scheduleView(sc) {
     return { ...clone(sc), usedBy: S.rules.filter((r) => r.scheduleId === sc.id).map((r) => ({ id: r.id, name: r.name })) };
@@ -611,12 +635,42 @@
     }
     return "";
   }
+  // startsWatching mirrors web.checkStartsWatching: saved action id can't gain
+  // a watch while it runs where a watching wait can't (another delay's watch,
+  // or on-failure steps), nor run itself from its own watch.
+  function startsWatching(id, own) {
+    const calls = (acts) => (acts || []).some((a) => a.type === "request" && a.requestId === id);
+    const watchCalls = (w) => !!w && (calls(w.actions) || calls(w.ifNoMatch));
+    if (watchCalls(own)) return "watch: its actions can't run this saved action itself, since it watches for events";
+    for (const r of S.rules) {
+      if (calls(r.onFailure)) return `rule "${r.name}" runs this in "If something goes wrong", where a wait can't watch for events; remove it there first`;
+      if (r.actions.some((a) => watchCalls(a.watch))) return `rule "${r.name}" runs this while another delay is watching, where it can't watch for events itself; remove it there first`;
+    }
+    const other = S.requests.find((x) => x.id !== id && watchCalls(x.request.watch));
+    return other ? `saved wait "${other.name}" runs this while it is watching, where it can't watch for events itself; remove it there first` : "";
+  }
+
   function validateSaved(body) {
     if (!String(body.name || "").trim()) return "name is required";
     const a = body.request || {};
     if (!["http", "delay", "discord", undefined].includes(a.type)) return `a saved action can't be of type "${a.type}"`;
-    if (a.watch) return "a saved delay can't watch for events; add the watch to a delay in the rule";
+    // A saved delay may watch (the watch's "same events" means the using rule's trigger).
+    const nested = nestedWatch(a.watch);
+    if (nested) return nested;
     return validateRule({ name: "x", actions: [{ ...a, type: a.type || "http" }] }).replace(/^action 1: /, "");
+  }
+  // nestedWatch mirrors checkNestedWatch: a watch can't run a saved delay
+  // that itself watches.
+  function nestedWatch(w) {
+    for (const [label, list] of [["on-match", w?.actions || []], ["if-no-match", w?.ifNoMatch || []]]) {
+      for (const [i, a] of list.entries()) {
+        if (a.type !== "request") continue;
+        const sr = S.requests.find((x) => x.id === a.requestId);
+        if (!sr) return `watch: ${label} action ${i + 1}: saved action #${a.requestId} doesn't exist`;
+        if (sr.request.watch) return `watch: ${label} action ${i + 1}: saved action "${sr.name}" watches for events, so it can't run while another delay is watching`;
+      }
+    }
+    return "";
   }
   function validateRule(r) {
     if (!String(r.name || "").trim()) return "name is required";
@@ -624,15 +678,28 @@
     if (r.scheduleId && !S.schedules.some((s) => s.id === r.scheduleId)) return `schedule #${r.scheduleId} doesn't exist`;
     const bad = validateActions(r.actions, "action", true);
     if (bad) return bad;
+    for (const [i, a] of r.actions.entries()) {
+      const nested = a.type === "delay" && nestedWatch(a.watch);
+      if (nested) return `action ${i + 1}: ${nested}`;
+    }
     if (r.onFailure?.some((a) => a.watch)) return `on-failure action ${r.onFailure.findIndex((a) => a.watch) + 1}: only the rule's own delays can watch for events`;
-    return validateActions(r.onFailure || [], "on-failure action", false);
+    const badOnFailure = validateActions(r.onFailure || [], "on-failure action", false);
+    if (badOnFailure) return badOnFailure;
+    // Like web.checkOnFailureWatch: on-failure steps can't watch.
+    for (const [i, a] of (r.onFailure || []).entries()) {
+      const sr = a.type === "request" && S.requests.find((x) => x.id === a.requestId);
+      if (sr?.request.watch) return `on-failure action ${i + 1}: ${onFailureWatchError(sr.name)}`;
+    }
+    return "";
   }
+  // onFailureWatchError mirrors actions.OnFailureWatchError.
+  const onFailureWatchError = (name) => `saved action "${name}" watches for events, which steps in "If something goes wrong" can't do`;
   function validateActions(list, label, watchable) {
     for (const [i, a] of list.entries()) {
       const at = `${label} ${i + 1}`;
       if (a.watch && a.type !== "delay") return `${at}: only delays can watch for events`;
       if (a.type === "http" && !a.url) return `${at}: url is required`;
-      if (a.type === "delay" && !(a.delayMillis > 0 && a.delayMillis <= 600000)) return `${at}: delayMillis must be between 1 and 600000`;
+      if (a.type === "delay" && !(a.delayMillis > 0 && a.delayMillis <= 600000)) return `${at}: a wait must be between 1 ms and 10 minutes`;
       if (a.type === "discord" && !a.message && !a.discord?.embeds?.length) return `${at}: a message or an embed is required`;
       if (a.type === "request") {
         const sr = S.requests.find((x) => x.id === a.requestId);
@@ -752,7 +819,38 @@
 
   const routes = [
     ["GET", /^\/api\/me$/, () => json(200, { user: ME, version: "demo", devAuth: false })],
-    ["GET", /^\/api\/catalog$/, () => json(200, { topics: Object.keys(CATALOG).sort(), codes: CATALOG, fields: FIELDS })],
+    ["GET", /^\/api\/catalog$/, () => json(200, { topics: Object.keys(CATALOG).sort(), codes: CATALOG })],
+    ["GET", /^\/api\/catalog\/fields$/, (_, __, url) => {
+      // Like the server, only the first 50 topics and codes are used.
+      const list = (k) => (url.searchParams.get(k) || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean).slice(0, 50);
+      const topics = list("topics"), codes = list("codes");
+      const acc = {};
+      const add = (name, v) => {
+        const a = acc[name] || (acc[name] = { seen: 0, values: {} });
+        a.seen++;
+        if ((typeof v === "string" && v.length <= 100) || typeof v === "number" || typeof v === "boolean") a.values[String(v)] = (a.values[String(v)] || 0) + 1;
+      };
+      // Like the server: the latest 500 matching events, leaving out test
+      // events, whose sample values aren't real.
+      const matching = S.events.filter((e) => {
+        const p = e.payload, topic = String(p.eventTopic || "").toLowerCase(), code = String(p.eventCode || "").toLowerCase();
+        if (e.test) return false;
+        if (topics.length && !topics.includes(topic)) return false;
+        return !codes.length || codes.includes(code) || codes.includes(`${topic}:${code}`);
+      });
+      for (const e of matching.slice(0, 500)) {
+        const p = e.payload;
+        for (const k of ["eventCode", "eventTopic", "eventDescription"]) if (k in p) add(k, p[k]);
+        if (p.eventData && typeof p.eventData === "object" && !Array.isArray(p.eventData)) for (const [k, v] of Object.entries(p.eventData)) add(k, v);
+      }
+      const fields = Object.entries(acc).map(([name, a]) => ({
+        name, seen: a.seen,
+        values: Object.entries(a.values).map(([value, count]) => ({ value, count }))
+          .sort((x, y) => y.count - x.count || (x.value < y.value ? -1 : x.value > y.value ? 1 : 0)).slice(0, 20),
+      })).sort((x, y) => y.seen - x.seen || (x.name < y.name ? -1 : 1));
+      const seen = new Set(fields.map((f) => f.name));
+      return json(200, { fields, known: FIELDS.filter((f) => !seen.has(f)) });
+    }],
     ["GET", /^\/api\/info$/, () => json(200, { webhookUrl: "https://y6.example.com/hook/3f9c2b7e8a41d6c0e5b9a27f4d18c63e", requireUserAgent: true, verifySourceIp: true, clientIpHeader: "CF-Connecting-IP", retentionDays: 30, secretsEnabled: true })],
 
     ["GET", /^\/api\/rules$/, () => json(200, [...S.rules].sort((a, b) => a.name.localeCompare(b.name)).map(ruleView))],
@@ -840,7 +938,7 @@
     ["PUT", /^\/api\/requests\/(\d+)$/, (m, body) => {
       const i = S.requests.findIndex((x) => x.id === +m[1]);
       if (i < 0) return err(404, "not found");
-      const bad = validateSaved(body);
+      const bad = validateSaved(body) || (body.request?.watch && startsWatching(+m[1], body.request.watch));
       if (bad) return err(400, bad);
       if (body.updatedAt && body.updatedAt !== S.requests[i].updatedAt) return conflict("saved action", S.requests[i], requestView(S.requests[i]));
       S.requests[i] = { ...S.requests[i], ...body, request: { ...body.request, type: body.request.type || "http" }, id: S.requests[i].id, updatedAt: iso(), updatedBy: ME.id, updatedByName: ME.displayName };
@@ -849,7 +947,11 @@
     }],
     ["DELETE", /^\/api\/requests\/(\d+)$/, (m) => {
       const used = requestView(S.requests.find((x) => x.id === +m[1]) || { id: -1 }).usedBy;
-      if (used.length) return json(409, { error: `still used by ${used.length} rule(s): [${used.map((r) => r.name).join(" ")}]; remove it from them first`, usedBy: used });
+      if (used.length) {
+        const ruleNames = used.filter((r) => r.kind !== "action").map((r) => r.name), waitNames = used.filter((r) => r.kind === "action").map((r) => r.name);
+        const parts = [ruleNames.length ? `${ruleNames.length} rule(s): [${ruleNames.join(" ")}]` : "", waitNames.length ? `${waitNames.length} saved wait(s): [${waitNames.join(" ")}]` : ""].filter(Boolean);
+        return json(409, { error: `still used by ${parts.join(" and ")}; remove it from them first`, usedBy: used });
+      }
       const sr = S.requests.find((x) => x.id === +m[1]);
       if (!sr) return err(404, "not found");
       S.requests = S.requests.filter((x) => x !== sr);
@@ -859,7 +961,7 @@
     ["POST", /^\/api\/requests\/(\d+)\/test$/, (m, body) => {
       const sr = S.requests.find((x) => x.id === +m[1]);
       if (!sr) return err(404, "not found");
-      const rule = { id: 0, name: `Saved action test: ${sr.name}`, actions: [{ type: "request", requestId: sr.id, params: body?.params || {} }] };
+      const rule = { id: 0, name: `Saved action test: ${sr.name}`, noRule: true, actions: [{ type: "request", requestId: sr.id, params: body?.params || {} }] };
       const ev = sample("device", "vmd");
       ev.eventId = "";
       const e = insertEvent(ev, { test: true, sourceIp: "test:demo" });

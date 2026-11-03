@@ -130,11 +130,98 @@ function windowSummary(w) {
 }
 const scheduleText = (s) => (s.windows || []).map(windowSummary).join("; ");
 
+// ---------- durations and operator labels ----------
+// splitSpan breaks milliseconds into whole hours, minutes and seconds for the
+// h/m/s inputs; exact is false when the value has a sub-second part (s is
+// then rounded).
+function splitSpan(ms) {
+  const total = Math.round(ms / 1000);
+  return { h: Math.floor(total / 3600), m: Math.floor((total % 3600) / 60), s: total % 60, exact: ms % 1000 === 0 };
+}
+// joinSpan is the inverse: milliseconds from h/m/s values, where blanks and
+// NaN count as 0.
+function joinSpan(h, m, s) {
+  const n = (v) => Number(v) || 0;
+  return (n(h) * 3600 + n(m) * 60 + n(s)) * 1000;
+}
+// fmtSpan renders milliseconds as "1 h 30 m", omitting zero parts. Sub-second
+// values under a minute show one decimal of seconds ("1.5 s").
+function fmtSpan(ms) {
+  if (ms < 60000 && ms % 1000 !== 0) return `${Math.round(ms / 100) / 10} s`;
+  const { h, m, s } = splitSpan(ms);
+  const parts = [h && `${h} h`, m && `${m} m`, s && `${s} s`].filter(Boolean);
+  return parts.length ? parts.join(" ") : "0 s";
+}
+
+// OP_LABELS maps each filter operator to the words shown in the UI.
+const OP_LABELS = [
+  ["equals", "is"], ["not_equals", "is not"], ["contains", "contains"], ["starts_with", "starts with"],
+  ["exists", "exists"], ["not_exists", "doesn't exist"], ["regex", "matches pattern (advanced)"],
+];
+const opNeedsValue = (op) => op !== "exists" && op !== "not_exists";
+
+// fieldOptions is the property suggestions for a condition row, from the
+// /api/catalog/fields response: [{group, value, label}]. typed filters them
+// (case-insensitive substring); unless it exactly names a property, a
+// leading ungrouped entry offers it as typed.
+function fieldOptions(stats, typed) {
+  const t = (typed || "").trim(), low = t.toLowerCase();
+  const fields = stats?.fields || [], known = stats?.known || [];
+  const hit = (name) => name.toLowerCase().includes(low);
+  const out = [];
+  if (t && ![...fields.map((f) => f.name), ...known].includes(t)) out.push({ group: null, value: t, label: `Use “${t}”` });
+  for (const f of fields) if (hit(f.name)) out.push({ group: "Seen in your events", value: f.name, label: `${f.name} · ${f.seen}` });
+  for (const k of known) if (hit(k)) out.push({ group: "Other known fields", value: k, label: k });
+  return out;
+}
+
+// comboStep is the suggestion a combo box's arrow keys move to from active
+// (-1 = none) among count suggestions: down from none is the first, up from
+// none the last, and moving past either end wraps. -1 when there are none.
+function comboStep(active, count, down) {
+  if (count <= 0) return -1;
+  if (active < 0) return down ? 0 : count - 1;
+  return (active + (down ? 1 : -1) + count) % count;
+}
+
+// sameAsStartTemplate is the watch condition value meaning "the same as the
+// event that started this rule" for a property, as the server's
+// Event.Field reads it: event-level properties come from .event, others from
+// .data (a leading "data." names the same property), using index for names
+// a template can't write as .data.name.
+const EVENT_LEVEL_FIELDS = ["eventId", "eventOccurred", "eventCode", "eventTopic", "eventDescription"];
+function sameAsStartTemplate(field) {
+  if (EVENT_LEVEL_FIELDS.includes(field)) return `{{ .event.${field} }}`;
+  const name = field.startsWith("data.") ? field.slice(5) : field;
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? `{{ .data.${name} }}` : `{{ index .data ${JSON.stringify(name)} }}`;
+}
+
+// ---------- rule editor ----------
+// limitsSummary is the one-line summary of a rule's "Limits and schedule"
+// section, e.g. "Weeknights · at most once every 5 m · skips while running".
+function limitsSummary({ scheduleName, cooldownSeconds, cooldownFrom, skipIfRunning }) {
+  const cooldown = cooldownSeconds > 0;
+  const parts = [scheduleName || "Any time"];
+  if (cooldown) parts.push(`at most once every ${fmtSpan(cooldownSeconds * 1000)}${cooldownFrom === "finish" ? " after the last run finishes" : ""}`);
+  if (skipIfRunning) parts.push("skips while running");
+  else if (!cooldown) parts.push("no limit");
+  return parts.join(" · ");
+}
+
+// stepErrorIndex finds the step a server validation error is about:
+// "action 3: …" is {list: "actions", index: 2} and "on-failure action 1: …"
+// is {list: "onFailure", index: 0}. Other errors give null.
+function stepErrorIndex(message) {
+  const m = /^(on-failure )?action (\d+)\b/.exec(message || "");
+  return m ? { list: m[1] ? "onFailure" : "actions", index: Number(m[2]) - 1 } : null;
+}
+
 // Node (the JS tests) gets the helpers as a module; browsers get globals.
 if (typeof module !== "undefined") {
   module.exports = {
     VOLATILE_KEYS, contentOf, pretty, changedKeys, lineDiff,
     DAYS, DAY_KEYS, DEFAULT_TZ, COMMON_TZ, tzLabel, WEEK_MINUTES, hm, fmtMinute,
     coverage, scheduleCoverage, zonedMinute, scheduleActive, redundantWindows, windowSummary, scheduleText,
+    splitSpan, joinSpan, fmtSpan, OP_LABELS, opNeedsValue, fieldOptions, comboStep, sameAsStartTemplate, limitsSummary, stepErrorIndex,
   };
 }

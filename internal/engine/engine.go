@@ -144,6 +144,17 @@ func (e *Engine) Dispatch(ctx context.Context, ev yoursix.Event, raw []byte, sou
 // engine's context, not the request's, so a proxy timing out the HTTP
 // request (e.g. Cloudflare's 100s limit) can't cancel it midway.
 func (e *Engine) StartTestRun(ctx context.Context, r rules.Rule, ev yoursix.Event, raw []byte, sourceIP string) (store.RunView, error) {
+	return e.startTestRun(ctx, r, ev, raw, sourceIP, false)
+}
+
+// StartSavedActionTestRun is StartTestRun for a saved action tested on its
+// own: r is a throwaway rule, so watches that follow the rule have nothing
+// to follow.
+func (e *Engine) StartSavedActionTestRun(ctx context.Context, r rules.Rule, ev yoursix.Event, raw []byte, sourceIP string) (store.RunView, error) {
+	return e.startTestRun(ctx, r, ev, raw, sourceIP, true)
+}
+
+func (e *Engine) startTestRun(ctx context.Context, r rules.Rule, ev yoursix.Event, raw []byte, sourceIP string, noRule bool) (store.RunView, error) {
 	row, _, err := e.store.InsertEvent(ctx, ev, raw, sourceIP, true)
 	if err != nil {
 		return store.RunView{}, err
@@ -157,7 +168,7 @@ func (e *Engine) StartTestRun(ctx context.Context, r rules.Rule, ev yoursix.Even
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
-		e.execute(row, runID, r, ev)
+		e.execute(row, runID, r, ev, noRule)
 	}()
 	return store.RunView{ID: runID, EventRow: row, RuleID: r.ID, RuleName: r.Name, Status: store.RunRunning, Steps: []actions.StepResult{}}, nil
 }
@@ -382,7 +393,7 @@ func (e *Engine) startRun(row int64, r rules.Rule, ev yoursix.Event) {
 			return
 		}
 		defer func() { <-e.sem }()
-		e.execute(row, runID, r, ev)
+		e.execute(row, runID, r, ev, false)
 	}()
 }
 
@@ -390,7 +401,7 @@ func (e *Engine) startRun(row int64, r rules.Rule, ev yoursix.Event) {
 // failed that wasn't set to continue on error, recording progress as it
 // goes. On-failure steps are appended to the run's steps, marked
 // OnFailure; the run still counts as failed.
-func (e *Engine) execute(row, runID int64, r rules.Rule, ev yoursix.Event) {
+func (e *Engine) execute(row, runID int64, r rules.Rule, ev yoursix.Event, noRule bool) {
 	data := ev.TemplateData(r.Name)
 	onStart, onWatch := e.stepTracker(row, runID)
 	opts := actions.RunOptions{
@@ -400,6 +411,7 @@ func (e *Engine) execute(row, runID int64, r rules.Rule, ev yoursix.Event) {
 		OnStepStart: onStart,
 		Watch:       e.watch,
 		RuleTrigger: r.Trigger,
+		NoRule:      noRule,
 		OnWatch:     onWatch,
 	}
 	steps, ok := e.runner.RunWith(e.ctx, r.Actions, data, opts)
@@ -418,6 +430,7 @@ func (e *Engine) execute(row, runID int64, r rules.Rule, ev yoursix.Event) {
 		save, started := opts.OnStep, opts.OnStepStart
 		opts.OnStep = func(s []actions.StepResult) { save(mark(s)) }
 		opts.OnStepStart = func(i int, a rules.Action, until time.Time) { started(i+len(main), a, until) }
+		opts.InOnFailure = true
 		extra, _ := e.runner.RunWith(e.ctx, r.OnFailure, data, opts)
 		steps = mark(extra)
 	}
@@ -492,6 +505,14 @@ func (e *Engine) Preview(ctx context.Context, r rules.Rule, ev yoursix.Event) (a
 	data := ev.TemplateData(r.Name)
 	for i, a := range r.Actions {
 		acts = append(acts, e.runner.Preview(ctx, a, data))
+		if a.Type == rules.ActionRequest {
+			// A saved wait that watches gives later steps .watch too. Its own
+			// watch actions are previewed in the saved action's editor.
+			if sr, err := e.store.SavedRequest(ctx, a.RequestID); err == nil && sr.Request.Type == rules.ActionDelay && sr.Request.Watch != nil {
+				data["watch"] = actions.WatchData(actions.WatchResult{Matches: 1, Stopped: sr.Request.Watch.Stop}, &ev, 0)
+			}
+			continue
+		}
 		if a.Watch == nil {
 			continue
 		}

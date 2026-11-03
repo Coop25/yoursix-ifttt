@@ -60,6 +60,27 @@ func TestEditConflict(t *testing.T) {
 	}
 }
 
+// Steps after a saved wait that watches preview .watch like they would after
+// a rule's own watching delay.
+func TestPreviewAfterSavedWatchingWait(t *testing.T) {
+	ta := newTwoAdmins(t)
+	waitID := ta.create(t, ta.alice, "/api/requests", map[string]any{
+		"name": "Hold", "request": map[string]any{"type": "delay", "delayMillis": 5,
+			"watch": map[string]any{"sameAsTrigger": true, "trigger": map[string]any{}, "restart": true, "maxMillis": 10}},
+	})
+	rule := map[string]any{
+		"name": "After wait", "trigger": map[string]any{"codes": []string{"vmd"}},
+		"actions": []map[string]any{
+			{"type": "request", "requestId": waitID},
+			{"type": "discord", "message": "matches={{ .watch.matches }}"},
+		},
+	}
+	code, body := ta.do(t, ta.alice, "POST", "/api/preview", map[string]any{"rule": rule})
+	if code != http.StatusOK || !strings.Contains(body, `"value":"matches=1"`) {
+		t.Fatalf("preview: %d %s", code, body)
+	}
+}
+
 func TestPreview(t *testing.T) {
 	ta := newTwoAdmins(t)
 	ta.do(t, ta.alice, "PUT", "/api/secrets/CAM_PASS", map[string]string{"value": secretValue})

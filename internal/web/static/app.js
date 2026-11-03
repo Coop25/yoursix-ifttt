@@ -50,7 +50,6 @@ function gatewayMessage(status) {
   return "";
 }
 
-const fmtDuration = (s) => (s % 3600 === 0 && s >= 3600 ? `${s / 3600}h` : s % 60 === 0 && s >= 60 ? `${s / 60}m` : `${s}s`);
 const fmtTime = (s) => (s ? new Date(s).toLocaleString() : "");
 const ago = (s) => {
   if (!s) return "never";
@@ -88,7 +87,6 @@ async function boot() {
   $("#tabs").classList.remove("hidden");
 
   state.catalog = await api("GET", "/api/catalog");
-  $("#field-list").append(...state.catalog.fields.map((f) => h("option", { value: f })));
 
   $$("#tabs button").forEach((b) => b.addEventListener("click", () => {
     if (b.dataset.tab === "history" && state.historyScope) {
@@ -193,7 +191,7 @@ function triggerSummary(t) {
 function actionSummary(a) {
   const label = a.name ? `${a.name}: ` : "";
   if (a.type === "http") return `${label}${a.method || "GET"} ${a.url}${a.auth ? ` (${a.auth} auth)` : ""}`;
-  if (a.type === "delay") return `${label}wait ${a.delayMillis} ms${a.watch ? `, ${watchSummary(a.watch)}` : ""}`;
+  if (a.type === "delay") return `${label}wait ${fmtSpan(a.delayMillis)}${a.watch ? `, ${watchSummary(a.watch)}` : ""}`;
   if (a.type === "discord") {
     const n = a.discord?.embeds?.length || 0;
     const extras = [n ? `${n} embed${n === 1 ? "" : "s"}` : "", a.discord?.pingUsers?.length || a.discord?.pingRoles?.length ? "pings" : "", a.discord?.silent ? "silent" : ""].filter(Boolean);
@@ -208,13 +206,13 @@ function actionSummary(a) {
 }
 
 // watchSummary describes a delay's watch: "watching the rule's trigger:
-// restart (up to 30m), then stop".
+// keep waiting (up to 30 m), then stop".
 function watchSummary(w) {
   const t = w.trigger || {};
   const what = w.sameAsTrigger ? "the rule's trigger" : [...(t.topics || []), ...(t.codes || [])].join(", ") || "events";
   const extra = (t.filters || []).length ? ` (${t.filters.length} filter${t.filters.length === 1 ? "" : "s"})` : "";
   const does = [
-    w.restart ? `restart (up to ${fmtDuration(Math.round(w.maxMillis / 1000))})` : "",
+    w.restart ? `keep waiting (up to ${fmtSpan(w.maxMillis)})` : "",
     w.actions?.length ? `${w.actions.map(actionSummary).join("; ")}${w.everyMatch ? " each time" : ""}` : "",
     w.stop ? "stop" : "",
   ].filter(Boolean);
@@ -233,7 +231,7 @@ function ruleCard(r) {
       r.enabled ? h("span.badge.ok", {}, "enabled") : h("span.badge", {}, "disabled"),
       active.length ? h("span.badge.running", {}, active.length > 1 ? `running ×${active.length}` : "running") : null,
       r.skipIfRunning ? h("span.badge", { title: "New events are ignored while a run is in progress" }, "one at a time") : null,
-      r.cooldownSeconds ? h("span.badge", { title: `Ignores events for ${r.cooldownSeconds}s after the last run ${r.cooldownFrom === "finish" ? "finished" : "started"}` }, `once per ${fmtDuration(r.cooldownSeconds)}${r.cooldownFrom === "finish" ? " after finish" : ""}`) : null,
+      r.cooldownSeconds ? h("span.badge", { title: `Ignores events for ${fmtSpan(r.cooldownSeconds * 1000)} after the last run ${r.cooldownFrom === "finish" ? "finished" : "started"}` }, `once per ${fmtSpan(r.cooldownSeconds * 1000)}${r.cooldownFrom === "finish" ? " after finish" : ""}`) : null,
       scheduleBadge(r.scheduleId),
       r.onFailure?.length ? h("span.badge", { title: "Runs extra actions when a step fails" }, "handles failures") : null,
       h("span.muted.small", { title: fmtTime(r.lastFiredAt) }, `fired ${ago(r.lastFiredAt)}`),
@@ -375,6 +373,7 @@ function watchDetail(w) {
     else groups.push({ match: s.match, steps: [s] });
   }
   return h("div.watch-detail", {},
+    w.note ? h("p.small.warn-text", {}, w.note) : null,
     h("div.muted.small", {}, "While waiting: ", parts.join(" · "), failed ? h("span.error", {}, ` · ${failed} action${failed === 1 ? "" : "s"} failed`) : null),
     groups.map((g) => [h("div.step-group", {}, g.match ? `On match ${g.match}` : "Nothing matched"), renderSteps(g.steps)]),
     w.dropped ? h("p.muted.small", {}, `${w.dropped} more results not kept.`) : null);
@@ -423,9 +422,30 @@ function cleanRule(r) {
 function wireEditor() {
   guardEditor("rule", $("#editor"), $("#editor-cancel"), editorState);
   $("#add-filter").addEventListener("click", () => addFilterRow({ field: "deviceName", op: "equals", value: "" }));
-  $$("[data-add-action]").forEach((b) => b.addEventListener("click", () => { addActionBox(blankAction(b.dataset.addAction)); schedulePreview(); }));
-  $$("[data-add-fail]").forEach((b) => b.addEventListener("click", () => { addActionBox(blankAction(b.dataset.addFail), $("#f-onfail")); schedulePreview(); }));
+  $("#f-filters-note").textContent = NO_SUGGESTIONS;
+  $$("[data-add-action]").forEach((b) => b.addEventListener("click", () => addStepTo(b.dataset.addAction, $("#f-actions"))));
+  $$("[data-add-fail]").forEach((b) => b.addEventListener("click", () => addStepTo(b.dataset.addFail, $("#f-onfail"))));
   $("#f-schedule").addEventListener("change", showScheduleInfo);
+  $("#f-enabled").addEventListener("change", showEnabled);
+  // The folded sections' summaries follow what's in them.
+  $("#f-onfail").addEventListener("stepschange", showOnFailCount);
+  for (const type of ["input", "change"]) $("#f-limits-fold").addEventListener(type, showLimits);
+  // The "⋯" and "+ Add step" menus (including those a watch adds, and in
+  // the saved action editor) close after a pick, on Esc (without closing
+  // the dialog) and on a click elsewhere.
+  for (const dlg of [$("#editor"), $("#req-editor")]) {
+    dlg.addEventListener("click", (e) => {
+      for (const m of $$("details.menu[open]", dlg)) if (!m.contains(e.target) || e.target.closest(".menu-item")) m.open = false;
+    });
+    dlg.addEventListener("keydown", (e) => {
+      const menu = e.target.closest?.("details.menu[open]");
+      if (e.key !== "Escape" || !menu) return;
+      e.preventDefault();
+      e.stopPropagation();
+      menu.open = false;
+      $("summary", menu).focus();
+    });
+  }
   wirePreview();
   $("#editor-json-mode").addEventListener("change", (e) => {
     const err = $("#editor-error");
@@ -436,8 +456,8 @@ function wireEditor() {
       } else {
         fillVisual(cleanRule(JSON.parse($("#f-json").value)));
       }
-      $("#editor-visual").classList.toggle("hidden", e.target.checked);
-      $("#editor-json").classList.toggle("hidden", !e.target.checked);
+      showEditorMode(e.target.checked);
+      $("#editor-menu").open = false;
     } catch (ex) {
       e.target.checked = !e.target.checked;
       err.textContent = "Invalid JSON: " + ex.message;
@@ -456,6 +476,7 @@ function wireEditor() {
     }
     const save = async (expected) => {
       err.textContent = "";
+      $$("#editor .action-box.has-error").forEach((b) => b.classList.remove("has-error"));
       try {
         if (state.editing && state.editing.id) await api("PUT", `/api/rules/${state.editing.id}`, { ...rule, ...(expected ? { updatedAt: expected } : {}) });
         else await api("POST", "/api/rules", rule);
@@ -468,20 +489,44 @@ function wireEditor() {
             reload: () => {
               state.editing = ex.data.current;
               $("#editor-json-mode").checked = false;
-              $("#editor-visual").classList.remove("hidden");
-              $("#editor-json").classList.add("hidden");
+              showEditorMode(false);
               fillVisual(cleanRule(structuredClone(ex.data.current)));
               guards.rule.snapshot();
               err.replaceChildren();
             },
           });
-        } else err.textContent = ex.message;
+        } else {
+          err.textContent = ex.message;
+          if (!$("#editor-json-mode").checked) revealStep(stepErrorIndex(ex.message));
+        }
       }
     };
     // Saving sends the version this editor opened, so the server can refuse
     // if someone else saved in between.
     save(state.editing?.updatedAt);
   });
+}
+
+// showEditorMode switches the rule editor between the form and its JSON.
+// The name and On/Off switch are part of the form, so JSON mode hides them.
+function showEditorMode(json) {
+  $("#editor-visual").classList.toggle("hidden", json);
+  $("#editor-basics").classList.toggle("hidden", json);
+  $("#editor-json").classList.toggle("hidden", !json);
+}
+
+// revealStep expands the step a save error is about (from stepErrorIndex),
+// unfolding its section, and scrolls it into view.
+function revealStep(at) {
+  if (!at) return;
+  const list = at.list === "onFailure" ? $("#f-onfail") : $("#f-actions");
+  const box = $$(":scope > .action-box", list)[at.index];
+  if (!box) return;
+  const fold = list.closest("details");
+  if (fold) fold.open = true;
+  setStepOpen(box, true);
+  box.classList.add("has-error");
+  box.scrollIntoView({ block: "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
 }
 
 // showConflict explains that someone else saved the item after this editor
@@ -509,8 +554,8 @@ async function openEditor(rule) {
   $("#editor-title").textContent = rule ? `Edit: ${rule.name}` : "New rule";
   $("#editor-error").textContent = "";
   $("#editor-json-mode").checked = false;
-  $("#editor-visual").classList.remove("hidden");
-  $("#editor-json").classList.add("hidden");
+  showEditorMode(false);
+  $("#editor-menu").open = false;
   fillVisual(cleanRule(rule ? structuredClone(rule) : blankRule()));
   $("#editor").showModal();
   guards.rule.snapshot();
@@ -519,11 +564,19 @@ async function openEditor(rule) {
 function fillVisual(r) {
   $("#f-name").value = r.name;
   $("#f-enabled").checked = r.enabled;
-  $("#f-cooldown").value = r.cooldownSeconds;
+  showEnabled();
+  state.cooldownInput = durationInput({ ms: r.cooldownSeconds * 1000, label: "Cooldown" });
+  $("#f-cooldown").replaceChildren(state.cooldownInput);
   $("#f-cooldown-from").value = r.cooldownFrom || "start";
   $("#f-skip-running").checked = !!r.skipIfRunning;
 
-  ({ topics: state.topicPicker, codes: state.codePicker } = triggerPickers($("#f-topics"), $("#f-codes"), r.trigger));
+  state.fieldStats = null;
+  $("#f-filters-note").classList.add("hidden");
+  ({ topics: state.topicPicker, codes: state.codePicker } = triggerPickers($("#f-topics"), $("#f-codes"), r.trigger, (topics, codes) => {
+    loadFieldStats(topics, codes);
+    // Delays that watch "the same events as this rule" follow its pickers.
+    $$("#f-actions > .action-box").forEach((b) => b.dispatchEvent(new CustomEvent("rulescope")));
+  }));
 
   $("#f-filters").replaceChildren();
   r.trigger.filters.forEach((flt) => addFilterRow(flt));
@@ -539,7 +592,29 @@ function fillVisual(r) {
     ...(r.scheduleId && !known.some((s) => s.id === r.scheduleId) ? [h("option", { value: r.scheduleId }, `#${r.scheduleId} (missing)`)] : []));
   sel.value = r.scheduleId ? String(r.scheduleId) : "";
   showScheduleInfo();
+  // Steps start collapsed (addActionBox's default) and the extra sections folded.
+  $("#f-onfail-fold").open = false;
+  $("#f-limits-fold").open = false;
+  showOnFailCount();
+  showLimits();
   schedulePreview();
+}
+
+const showEnabled = () => { $("#f-enabled-text").textContent = $("#f-enabled").checked ? "On" : "Off"; };
+
+function showOnFailCount() {
+  const n = $$("#f-onfail > .action-box").length;
+  $("#f-onfail-count").textContent = n ? `· ${n} step${n === 1 ? "" : "s"}` : "· none";
+}
+
+function showLimits() {
+  const sel = $("#f-schedule");
+  $("#f-limits-summary").textContent = "· " + limitsSummary({
+    scheduleName: sel.value ? sel.selectedOptions[0]?.textContent : "",
+    cooldownSeconds: state.cooldownInput ? state.cooldownInput.read() / 1000 : 0,
+    cooldownFrom: $("#f-cooldown-from").value,
+    skipIfRunning: $("#f-skip-running").checked,
+  });
 }
 
 // showScheduleInfo describes the schedule picked in the rule editor.
@@ -556,20 +631,24 @@ function showScheduleInfo() {
 
 // triggerPickers turns topicsEl and codesEl into a trigger's topic and
 // event code pickers, filled from trigger. The codes offered follow the
-// chosen topics.
-function triggerPickers(topicsEl, codesEl, trigger) {
+// chosen topics. onchange(topics, codes) runs after either picker changes.
+function triggerPickers(topicsEl, codesEl, trigger, onchange) {
   let topics = null; // set below; the code picker's options read it
   const codes = pillPicker(codesEl, {
-    placeholder: "Add an event code…", empty: "Any event code", warnUnknown: true,
+    placeholder: "Add an event code…", empty: "Any event", warnUnknown: true,
     options: () => {
       const picked = topics ? topics.values() : [];
       return (picked.length ? picked : state.catalog.topics).map((t) => [t, state.catalog.codes[t] || []]);
     },
+    onchange: () => onchange?.(topics.values(), codes.values()),
   });
   topics = pillPicker(topicsEl, {
-    placeholder: "Add a topic…", empty: "Any topic",
+    placeholder: "Add a topic…", empty: "Any event",
     options: () => [[null, state.catalog.topics]],
-    onchange: () => codes.refresh(),
+    onchange: () => {
+      codes.refresh();
+      onchange?.(topics.values(), codes.values());
+    },
   });
   topics.set(trigger.topics || []);
   codes.set(trigger.codes || []);
@@ -630,12 +709,149 @@ function pillPicker(container, { placeholder, empty, options, onchange, warnUnkn
   return { values, refresh, set };
 }
 
-function addFilterRow(f, container = $("#f-filters")) {
-  const row = $("#tpl-filter").content.firstElementChild.cloneNode(true);
-  $(".ff-field", row).value = f.field || "";
-  $(".ff-op", row).value = f.op || "equals";
-  $(".ff-value", row).value = f.value || "";
-  $(".ff-del", row).addEventListener("click", () => row.remove());
+// ---------- condition rows ----------
+// fieldStatsLoader returns load(topics, codes, now), which fetches the
+// property and value suggestions for those topics and codes (debounced
+// 300 ms unless now) and passes the response, or null if it failed, to
+// apply. A stale response is dropped.
+function fieldStatsLoader(apply) {
+  let timer = 0, seq = 0;
+  return (topics, codes, now = false) => {
+    clearTimeout(timer);
+    // Counted when scheduled, so a response for earlier topics (or an
+    // earlier editor) that arrives after this call is ignored.
+    const n = ++seq;
+    const run = async () => {
+      const q = new URLSearchParams({ topics: topics.join(","), codes: codes.join(",") });
+      let data = null; // suggestions are optional: on an error, offer none
+      try { data = await api("GET", `/api/catalog/fields?${q}`); } catch { /* keep null */ }
+      if (n === seq) apply(data);
+    };
+    if (now) run();
+    else timer = setTimeout(run, 300);
+  };
+}
+const NO_SUGGESTIONS = "Suggestions appear once events start arriving.";
+// loadFieldStats refreshes state.fieldStats, the rule's own conditions' suggestions.
+const loadFieldStats = fieldStatsLoader((data) => {
+  state.fieldStats = data;
+  $("#f-filters-note").classList.toggle("hidden", !data || !!data.fields.length);
+});
+
+let comboSeq = 0;
+// comboBox is a text box with a popup list of suggestions; any text can be
+// typed. options(typed) returns [{group, value, label}] (group may be null).
+// typed is "" until the user edits the text, so an existing value doesn't
+// hide the other choices. The element's .value is the text, and it fires a
+// bubbling "change" when a suggestion is picked or the text is committed.
+function comboBox({ value = "", placeholder = "", label, options }) {
+  const id = `combo-${++comboSeq}`;
+  const input = h("input", {
+    type: "text", role: "combobox", autocomplete: "off", spellcheck: "false", placeholder, "aria-label": label,
+    "aria-autocomplete": "list", "aria-expanded": "false", "aria-controls": id,
+  });
+  // Pressing on the list (its scrollbar, a group heading) mustn't blur the input and close it.
+  const list = h("ul.combo-list.hidden", { id, role: "listbox", "aria-label": label, onmousedown: (e) => e.preventDefault() });
+  const el = h("div.combo", {}, input, list);
+  input.value = value;
+  let dirty = false, active = -1;
+  const isOpen = () => !list.classList.contains("hidden");
+  const items = () => $$("[role=option]", list);
+  const setActive = (i) => {
+    const all = items();
+    active = i >= 0 && i < all.length ? i : -1;
+    all.forEach((o, j) => o.setAttribute("aria-selected", String(j === active)));
+    if (active >= 0) {
+      input.setAttribute("aria-activedescendant", all[active].id);
+      all[active].scrollIntoView({ block: "nearest" });
+    } else input.removeAttribute("aria-activedescendant");
+  };
+  const close = () => {
+    list.classList.add("hidden");
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    active = -1;
+  };
+  const pick = (v) => {
+    input.value = v;
+    dirty = false;
+    close();
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const open = () => {
+    const opts = options(dirty ? input.value : "");
+    if (!opts.length) return close();
+    let group = null;
+    list.replaceChildren(...opts.flatMap((o, i) => {
+      const out = [];
+      if (o.group && o.group !== group) out.push(h("li.combo-group", { role: "presentation" }, o.group));
+      group = o.group;
+      const opt = h("li.combo-opt", {
+        role: "option", id: `${id}-${i}`, "aria-selected": "false",
+        onmousedown: (e) => { e.preventDefault(); pick(o.value); }, // before the input loses focus
+      }, o.label);
+      opt.dataset.value = o.value;
+      return [...out, opt];
+    }));
+    list.classList.remove("hidden");
+    input.setAttribute("aria-expanded", "true");
+    setActive(-1); // nothing chosen, so Enter keeps what's typed
+    list.scrollTop = 0;
+  };
+  input.addEventListener("focus", () => { dirty = false; open(); });
+  input.addEventListener("click", () => { if (!isOpen()) open(); });
+  input.addEventListener("input", () => { dirty = true; open(); });
+  input.addEventListener("blur", close);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const down = e.key === "ArrowDown";
+      if (!isOpen()) open();
+      setActive(comboStep(active, items().length, down));
+    } else if (e.key === "Enter" && isOpen()) {
+      e.preventDefault(); // don't submit (save) the whole form
+      // A chosen suggestion, or else what's typed, as it is.
+      pick(active >= 0 ? items()[active].dataset.value : input.value);
+    } else if (e.key === "Escape" && isOpen()) {
+      e.preventDefault();
+      e.stopPropagation(); // close the list, not the dialog
+      close();
+    }
+  });
+  // Typed text commits on blur via the input's own change event, which
+  // bubbles to el like a picked suggestion's does.
+  Object.defineProperty(el, "value", { get: () => input.value, set: (v) => { input.value = v; } });
+  return el;
+}
+
+// addFilterRow adds a condition row to container. Suggestions come from
+// stats(), the /api/catalog/fields response or null. In a watch, values can
+// also refer to the event that started the run.
+function addFilterRow(f, container = $("#f-filters"), { watch = false, stats = () => state.fieldStats } = {}) {
+  const prop = comboBox({
+    value: f.field || "", placeholder: "Property, e.g. deviceName", label: "Property",
+    options: (typed) => fieldOptions(stats(), typed),
+  });
+  const op = h("select.ff-op", { "aria-label": "Condition" }, OP_LABELS.map(([v, text]) => h("option", { value: v }, text)));
+  if (f.op && !OP_LABELS.some(([v]) => v === f.op)) op.append(h("option", { value: f.op }, f.op));
+  op.value = f.op || "equals";
+  const val = comboBox({
+    value: f.value || "", placeholder: "Value", label: "Value",
+    options: (typed) => {
+      const name = prop.value.trim(), low = typed.toLowerCase();
+      const out = watch && name && !typed ? [{ group: null, value: sameAsStartTemplate(name), label: "Same as the event that started this rule" }] : [];
+      const seen = (stats()?.fields || []).find((x) => x.name === name);
+      for (const v of seen?.values || []) if (v.value.toLowerCase().includes(low)) out.push({ group: null, value: v.value, label: `${v.value} · ${v.count}` });
+      return out;
+    },
+  });
+  prop.classList.add("ff-field");
+  val.classList.add("ff-value");
+  const sync = () => val.classList.toggle("hidden", !opNeedsValue(op.value));
+  op.addEventListener("change", sync);
+  sync();
+  const row = h("div.filter-row", {}, prop, op, val,
+    h("button.btn.small.danger.ff-del", { type: "button", "aria-label": "Remove condition", onclick: () => row.remove() }, "✕"));
   container.append(row);
 }
 
@@ -647,20 +863,44 @@ const readFilters = (container) => $$(":scope > .filter-row", container).map((ro
 
 const field = (label, input) => [h("span.muted", {}, label), input];
 
-const ACTION_LABELS = { http: "HTTP request", delay: "Delay", discord: "Discord message", request: "Saved action" };
+// durationInput is hours, minutes and seconds boxes for a length of time.
+// read() gives milliseconds; a loaded value with a sub-second part is kept
+// as it was until a box is edited. set(ms) refills the boxes, and
+// disable(bool) greys them out.
+function durationInput({ ms = 0, label }) {
+  const parts = [["h", "hours", 3600000], ["m", "minutes", 60000], ["s", "seconds", 1000]];
+  const boxes = parts.map(([, name]) => h("input.dur", {
+    type: "number", min: 0, step: 1, inputmode: "numeric", "aria-label": `${label} ${name}`,
+  }));
+  const note = h("span.muted.small.dur-note", {});
+  const el = h("span.duration", {}, ...boxes.map((b, i) => [b, h("span.muted", {}, parts[i][0]), " "]), note);
+  let original = ms, edited = false;
+  el.set = (v) => {
+    const sp = splitSpan(v);
+    [sp.h, sp.m, sp.s].forEach((n, i) => { boxes[i].value = n; });
+    original = v;
+    edited = false;
+    note.textContent = sp.exact ? "" : `Saved as ${v} ms; editing will round to whole seconds`;
+  };
+  el.read = () => (!edited && original % 1000 !== 0 ? original : joinSpan(...boxes.map((b) => b.value)));
+  el.disable = (off) => boxes.forEach((b) => { b.disabled = off; });
+  for (const b of boxes) b.addEventListener("input", () => { edited = true; });
+  el.set(ms);
+  return el;
+}
+
+const ACTION_LABELS = { http: "HTTP request", delay: "Wait", discord: "Discord message", request: "Saved action" };
 
 // addActionBox renders an action's form into container (the rule editor's
-// action list by default). With fixed, it's the single action in the saved
-// action editor: no header, reorder/remove buttons, name or continue-on-error.
-function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
+// action list by default) as a step card: a header with the step's number,
+// a one-line summary that opens and closes the form, and move, duplicate
+// and remove buttons. It starts collapsed unless open. With fixed, it's the
+// single action in the saved action editor: no header, name or
+// continue-on-error, always shown.
+function addActionBox(a, container = $("#f-actions"), { fixed = false, open = false } = {}) {
   const box = h("div.action-box" + (fixed ? ".fixed" : ""), {});
   box.dataset.type = a.type;
-  const head = fixed ? null : h("div.action-head", {},
-    h("strong", {}, ACTION_LABELS[a.type] || a.type),
-    h("button.btn.small", { type: "button", "aria-label": "Move up", onclick: () => box.previousElementSibling && box.parentNode.insertBefore(box, box.previousElementSibling) }, "↑"),
-    h("button.btn.small", { type: "button", "aria-label": "Move down", onclick: () => box.nextElementSibling && box.parentNode.insertBefore(box.nextElementSibling, box) }, "↓"),
-    h("button.btn.small.danger", { type: "button", "aria-label": "Remove action", onclick: () => box.remove() }, "✕"),
-  );
+  let watch = null;
   const inp = (k, attrs = {}) => h("input", { "data-k": k, value: a[k] ?? "", ...attrs });
   let grid;
   if (a.type === "http") {
@@ -681,7 +921,7 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
       field("Password", inp("password", { placeholder: '{{ secret "CAMERA_PASS" }}' })),
       field("Headers", headers),
       field("Body", body),
-      field("Timeout (s)", inp("timeoutSeconds", { type: "number", min: 0, max: 120 })),
+      field("Give up after (seconds)", inp("timeoutSeconds", { type: "number", min: 0, max: 120 })),
       field("Expect status", inp("expectStatus", { value: (a.expectStatus || []).join(","), placeholder: "default: any 2xx" })),
       field("Options", h("div.row", {},
         h("label.inline", {}, h("input", { type: "checkbox", "data-k": "insecureTLS", checked: !!a.insecureTLS }), "Allow self-signed TLS"),
@@ -690,14 +930,14 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
   } else if (a.type === "delay") {
     grid = h("div.action-grid", {},
       fixed ? null : field("Name", inp("name", { placeholder: "optional label" })),
-      field("Delay (ms)", inp("delayMillis", { type: "number", min: 1, max: 600000 })));
-    // Only a rule's own delays can watch for events. A watch anywhere else
-    // (typed in JSON) is kept as it is, so saving explains why it's refused
-    // instead of quietly dropping it.
-    if (!fixed && container.id === "f-actions") box.append(head, grid, watchSection(a, box));
+      field("Wait for", box._delay = durationInput({ ms: a.delayMillis ?? 0, label: "Wait" })));
+    // Only a rule's own delays and the saved action's delay can watch for
+    // events. A watch anywhere else (typed in JSON) is kept as it is, so
+    // saving explains why it's refused instead of quietly dropping it.
+    if (fixed ? container.id === "r-request" : container.id === "f-actions") watch = watchSection(a, box, { saved: fixed });
     else if (a.watch) {
       box.dataset.watch = JSON.stringify(a.watch);
-      grid.append(h("p.error.full", {}, "This delay watches for events, which only the rule's own delays can do. Edit or remove the watch in JSON."));
+      grid.append(h("p.error.full", {}, "This delay watches for events, which only a rule's own delays and a saved delay can do. Edit or remove the watch in JSON."));
     }
   } else if (a.type === "discord") {
     grid = discordActionGrid(a, inp, fixed);
@@ -707,58 +947,170 @@ function addActionBox(a, container = $("#f-actions"), { fixed = false } = {}) {
     grid = h("pre", {}, JSON.stringify(a, null, 2));
     box.dataset.raw = JSON.stringify(a);
   }
-  if (!box.childElementCount) box.append(...[head, grid].filter(Boolean));
+  if (fixed) {
+    box.append(grid);
+    if (watch) box.append(watch);
+    container.append(box);
+    return box;
+  }
+  box._body = h("div.action-body", { id: `step-${++stepSeq}` }, grid, watch);
+  box.append(stepHead(box), box._body);
   container.append(box);
+  setStepOpen(box, open);
+  // The summary follows the form, and an edit clears a save error's mark.
+  for (const type of ["input", "change", "click"]) box.addEventListener(type, () => box._refresh());
+  box.addEventListener("input", () => box.classList.remove("has-error"));
+  box._refresh();
+  stepsChanged(container);
   return box;
 }
 
+let stepSeq = 0;
+
+// stepHead is a step card's header. It sets box._refresh, which redraws the
+// summary from the form.
+function stepHead(box) {
+  const num = h("span.step-num", {});
+  const text = h("span.step-summary", {});
+  const toggle = h("button.step-toggle", { type: "button", "aria-controls": box._body.id, onclick: () => setStepOpen(box, box.dataset.open !== "true") },
+    h("span.step-chevron", { "aria-hidden": "true" }), num, text);
+  box._num = num;
+  box._refresh = () => {
+    let summary;
+    try { summary = stepTitle(readAction(box)); } catch { summary = ACTION_LABELS[box.dataset.type] || box.dataset.type; }
+    text.textContent = summary;
+    toggle.title = summary;
+  };
+  const tool = (label, icon, onclick, cls = "") => h("button.btn.small" + cls, { type: "button", "aria-label": label, title: label, onclick }, icon);
+  const list = () => box.parentNode;
+  return h("div.step-head", {}, toggle,
+    h("div.step-tools", {},
+      tool("Move up", "↑", () => { if (box.previousElementSibling) list().insertBefore(box, box.previousElementSibling); stepsChanged(list()); }),
+      tool("Move down", "↓", () => { if (box.nextElementSibling) list().insertBefore(box.nextElementSibling, box); stepsChanged(list()); }),
+      tool("Duplicate step", "⧉", () => {
+        const copy = addActionBox(readAction(box), list(), { open: true });
+        box.after(copy);
+        stepsChanged(list());
+      }),
+      tool("Remove step", "✕", () => {
+        const l = list();
+        const next = box.nextElementSibling?.matches(".action-box") ? box.nextElementSibling : box.previousElementSibling;
+        box.remove();
+        stepsChanged(l);
+        ($(".step-toggle", next || l) || $("summary", addMenuOf(l) || l))?.focus();
+      }, ".danger")));
+}
+
+function setStepOpen(box, open) {
+  box.dataset.open = String(open);
+  box._body.classList.toggle("hidden", !open);
+  $(".step-toggle", box).setAttribute("aria-expanded", String(open));
+}
+
+// stepsChanged renumbers a step list after a step is added, moved or
+// removed, and tells the editor (a bubbling "stepschange" event). Summaries
+// don't include the number, so they're left as they are.
+function stepsChanged(list) {
+  $$(":scope > .action-box", list).forEach((b, i) => {
+    if (b._num) b._num.textContent = String(i + 1);
+  });
+  list.dispatchEvent(new CustomEvent("stepschange", { bubbles: true }));
+}
+
+// stepTitle is a step card's one-line summary: actionSummary, capitalised,
+// or what's still missing.
+function stepTitle(a) {
+  const label = a.name ? `${a.name}: ` : "";
+  if (a.type === "http" && !a.url) return `${label}HTTP request (no URL yet)`;
+  if (a.type === "request" && !a.requestId) return `${label}Saved action (none chosen yet)`;
+  if (a.type === "discord" && !a.message && !a.discord?.embeds?.length) return `${label}Discord message (no message yet)`;
+  const s = actionSummary(a);
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// addStepTo adds a blank step of a type to a list, open, and focuses it.
+function addStepTo(type, list) {
+  const box = addActionBox(blankAction(type), list, { open: true });
+  $(".step-toggle", box).focus();
+  schedulePreview();
+}
+
+// addMenuOf is the "+ Add step" menu that follows a step list.
+const addMenuOf = (list) => (list.nextElementSibling?.matches(".add-menu") ? list.nextElementSibling : null);
+
+// addStepMenu is a "+ Add step" menu for a list; types are [type, label].
+function addStepMenu(list, types) {
+  return h("details.menu.add-menu", {},
+    h("summary.btn.small", {}, "+ Add step"),
+    h("div.menu-list", {}, types.map(([type, label]) => h("button.menu-item", { type: "button", onclick: () => addStepTo(type, list) }, label))));
+}
+
 // watchSection is a delay's "While waiting, watch for events" settings
-// (a.watch). It sets box._readWatch, which readAction uses.
-function watchSection(a, box) {
+// (a.watch). It sets box._readWatch, which readAction uses. With saved, it's
+// in the saved action editor: "the trigger" is that of whichever rule uses
+// the action, which isn't known here, so suggestions cover all events.
+function watchSection(a, box, { saved = false } = {}) {
   const w = a.watch || { sameAsTrigger: true, trigger: { filters: [] }, restart: true, maxMillis: 1800000 };
   const t = w.trigger || {};
   const on = h("input", { type: "checkbox", class: "w-on", checked: !!a.watch });
   const same = h("input", { type: "checkbox", class: "w-same", checked: !!w.sameAsTrigger });
   const topics = h("div.picker"), codes = h("div.picker");
-  const { topics: topicPicker, codes: codePicker } = triggerPickers(topics, codes, t);
-  const own = h("div.w-own", {}, field("Topics", topics), field("Event codes", codes));
+  // Suggestions for this watch's conditions follow the events it watches.
+  let fieldStats = null;
+  const note = h("p.muted.small.hidden", {}, NO_SUGGESTIONS);
+  const loadStats = fieldStatsLoader((data) => {
+    fieldStats = data;
+    note.classList.toggle("hidden", !data || !!data.fields.length);
+  });
+  let own = [[], []]; // the watch's own topics and codes
+  const ruleScope = () => (saved ? [[], []] : [selectedTopics(), readCodes()]);
+  const refreshStats = () => { if (on.checked) loadStats(...(same.checked ? ruleScope() : own)); };
+  const { topics: topicPicker, codes: codePicker } = triggerPickers(topics, codes, t, (tp, cp) => {
+    own = [tp, cp];
+    refreshStats();
+  });
+  const ownBox = h("div.w-own", {}, field("Topics", topics), field("Event codes", codes));
   const filters = h("div.w-filters");
-  (t.filters || []).forEach((f) => addFilterRow(f, filters));
+  const rowOpts = { watch: true, stats: () => fieldStats };
+  (t.filters || []).forEach((f) => addFilterRow(f, filters, rowOpts));
   const restart = h("input", { type: "checkbox", class: "w-restart", checked: !!w.restart });
-  const maxSecs = h("input.narrow", { type: "number", min: 1, max: 3600, value: Math.round((w.maxMillis || 1800000) / 1000), "aria-label": "Longest wait in seconds" });
+  const maxDur = durationInput({ ms: w.maxMillis || 1800000, label: "Longest wait" });
   const runActs = h("input", { type: "checkbox", class: "w-run", checked: !!w.actions?.length });
   const every = h("input", { type: "checkbox", class: "w-every", checked: !!w.everyMatch });
   const stop = h("input", { type: "checkbox", class: "w-stop", checked: !!w.stop });
   const acts = h("div.w-actions"), quiet = h("div.w-nomatch");
   (w.actions || []).forEach((x) => addActionBox(x, acts));
   (w.ifNoMatch || []).forEach((x) => addActionBox(x, quiet));
-  const addButtons = (list) => h("div.row", {}, [["discord", "+ Discord message"], ["http", "+ HTTP request"], ["request", "+ Saved action"]].map(([type, label]) =>
-    h("button.btn.small", { type: "button", onclick: () => { addActionBox(blankAction(type), list); schedulePreview(); } }, label)));
-  const actsBlock = h("div.w-sub", {}, acts, addButtons(acts),
+  // Waits inside a watch can't watch themselves, so they aren't offered.
+  const addMenu = (list) => addStepMenu(list, [["discord", "Discord message"], ["http", "HTTP request"], ["request", "Saved action"]]);
+  const actsBlock = h("div.w-sub", {}, acts, addMenu(acts),
     h("label.inline", {}, every, "Run them on every match, not just the first"));
 
   const body = h("div.watch-body", {},
-    h("label.inline", {}, same, "Same events as this rule's trigger"),
-    own,
-    h("div.w-label", {}, "Filters ", h("span.muted.small", {}, "Values can use the event that started the run, e.g. deviceName equals ", h("code", {}, "{{ .data.deviceName }}"), " for the same camera.")),
+    h("label.inline", {}, same, saved ? "Same events as the rule that uses this action" : "Same events as this rule's trigger"),
+    ownBox,
+    h("div.w-label", {}, "Filters ", h("span.muted.small", {}, "Values can use the event that started the run, e.g. deviceName equals ", h("code", {}, "{{ .data.deviceName }}"), " for the same camera", saved ? [", or a parameter: ", h("code", {}, "{{ .params.name }}")] : null, ".")),
     filters,
-    h("div.row", {}, h("button.btn.small", { type: "button", onclick: () => addFilterRow({ field: "deviceName", op: "equals", value: "{{ .data.deviceName }}" }, filters) }, "+ Filter")),
+    h("div.row", {}, h("button.btn.small", { type: "button", onclick: () => addFilterRow({ field: "deviceName", op: "equals", value: "{{ .data.deviceName }}" }, filters, rowOpts) }, "+ Add condition")),
+    note,
     h("div.w-label", {}, "When one arrives"),
-    h("label.inline", {}, restart, "Restart the countdown, up to ", maxSecs, " seconds in total"),
+    h("label.inline", {}, restart, "Keep waiting up to ", maxDur, " in total"),
     h("label.inline", {}, runActs, "Run actions"),
     actsBlock,
     h("label.inline", {}, stop, "Stop the rule (skip its remaining steps)"),
     h("div.w-label", {}, "If nothing arrives ", h("span.muted.small", {}, "(optional) Runs when the wait ends without a match.")),
-    quiet, addButtons(quiet),
+    quiet, addMenu(quiet),
     h("p.muted.small", {}, "Matching events are still checked against every rule as usual. Actions here see ", h("code", {}, "{{ .watch.matches }}"), ", ",
       h("code", {}, "{{ .watch.data.deviceName }}"), " (the matched event) and more; so do the rule's later steps."));
   const sync = () => {
     body.classList.toggle("hidden", !on.checked);
-    own.classList.toggle("hidden", same.checked);
-    maxSecs.disabled = !restart.checked;
+    ownBox.classList.toggle("hidden", same.checked);
+    maxDur.disable(!restart.checked);
     actsBlock.classList.toggle("hidden", !runActs.checked);
+    refreshStats();
   };
   for (const el of [on, same, restart, runActs]) el.addEventListener("change", sync);
+  if (!saved) box.addEventListener("rulescope", () => { if (same.checked) refreshStats(); });
   sync();
 
   box._readWatch = () => {
@@ -767,7 +1119,7 @@ function watchSection(a, box) {
     const out = { trigger: same.checked ? { topics: [], codes: [] } : { topics: topicPicker.values(), codes: codePicker.values() } };
     out.trigger.filters = readFilters(filters);
     if (same.checked) out.sameAsTrigger = true;
-    if (restart.checked) Object.assign(out, { restart: true, maxMillis: (Number(maxSecs.value) || 0) * 1000 });
+    if (restart.checked) Object.assign(out, { restart: true, maxMillis: maxDur.read() });
     if (runActs.checked) {
       const list = $$(":scope > .action-box", acts).map(readAction);
       if (list.length) out.actions = list;
@@ -965,12 +1317,13 @@ function readAction(box) {
       if (codes.length) a.expectStatus = codes;
     } else if (k === "requestId") {
       if (el.value !== "") a.requestId = Number(el.value);
-    } else if (["timeoutSeconds", "delayMillis"].includes(k)) {
+    } else if (k === "timeoutSeconds") {
       if (el.value !== "") a[k] = Number(el.value);
     } else if (el.value !== "") {
       a[k] = el.value;
     }
   }
+  if (a.type === "delay" && box._delay) a.delayMillis = box._delay.read();
   if (a.type === "request") {
     const params = {};
     for (const el of $$("[data-param]", box)) if (el.value !== "") params[el.dataset.param] = el.value;
@@ -993,7 +1346,7 @@ function readVisual() {
   return {
     name: $("#f-name").value.trim(),
     enabled: $("#f-enabled").checked,
-    cooldownSeconds: Number($("#f-cooldown").value) || 0,
+    cooldownSeconds: state.cooldownInput.read() / 1000,
     cooldownFrom: $("#f-cooldown-from").value,
     skipIfRunning: $("#f-skip-running").checked,
     trigger: {
@@ -1026,7 +1379,7 @@ function wirePreview() {
   for (const type of ["input", "change"]) {
     $("#editor-visual").addEventListener(type, (e) => { if (e.target !== box) schedulePreview(); });
   }
-  $("#editor-visual").addEventListener("click", (e) => { if (e.target.closest(".action-head button, .ff-del, .pill button")) schedulePreview(); });
+  $("#editor-visual").addEventListener("click", (e) => { if (e.target.closest(".step-tools button, .action-head button, .ff-del, .pill button")) schedulePreview(); });
 }
 
 function schedulePreview() {
@@ -1057,10 +1410,11 @@ async function runPreview() {
     res.matchesTrigger ? "." : h("span.error", {}, " (it doesn't pass this rule's filters, so values may differ from real events)."));
   $("#preview-note").classList.remove("hidden");
   const show = (boxes, results) => boxes.forEach((box, i) => {
-    $(":scope > .preview", box)?.remove();
+    const host = box._body || box; // inside the card's form, so it folds with it
+    $(":scope > .preview", host)?.remove();
     const fields = results?.[i] || [];
     if (!fields.length) return;
-    box.append(h("div.preview", {}, h("div.preview-title", {}, "Preview"),
+    host.append(h("div.preview", {}, h("div.preview-title", {}, "Preview"),
       fields.map((f) => h("div.pv-row", {},
         h("span.pv-field", {}, f.field),
         f.error ? h("span.pv-value.error", {}, f.error) : h("code.pv-value", {}, f.value || "(empty)")))));
@@ -1630,7 +1984,7 @@ function requestCard(sr) {
     sr.params.length
       ? h("p.summary", {}, "Parameters: ", sr.params.map((p) => h("span.badge", { title: p.description || "" }, p.default ? `${p.name} = ${p.default}` : `${p.name} (required)`)))
       : null,
-    h("p.summary", {}, sr.usedBy.length ? ["Used by: ", sr.usedBy.map((r) => h("span.badge", {}, r.name))] : "Not used by any rule yet."),
+    h("p.summary", {}, sr.usedBy.length ? ["Used by: ", sr.usedBy.map((r) => h("span.badge", { title: r.kind === "action" ? "A saved wait that runs this while it watches" : "" }, r.kind === "action" ? `saved wait: ${r.name}` : r.name))] : "Not used by any rule yet."),
     sr.updatedByName && state.me && sr.updatedBy !== state.me.id
       ? h("p.muted.small", {}, `Saved by ${sr.updatedByName}.`)
       : null,
