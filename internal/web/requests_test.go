@@ -210,3 +210,32 @@ func TestSavedRequestDeleteInUse(t *testing.T) {
 		t.Fatalf("delete unused: %d", code)
 	}
 }
+
+func TestSavedActionRejectsNestedWatchingDelay(t *testing.T) {
+	ta := newTwoAdmins(t)
+	watching := ta.create(t, ta.alice, "/api/requests", map[string]any{
+		"name": "Watcher", "request": map[string]any{"type": "delay", "delayMillis": 5,
+			"watch": map[string]any{"trigger": map[string]any{"codes": []string{"vmd"}}, "stop": true}},
+	})
+	calls := []map[string]any{{"type": "request", "requestId": watching}}
+	const want = "can't run while another delay is watching"
+
+	code, body := ta.do(t, ta.alice, "POST", "/api/requests", map[string]any{
+		"name": "Outer", "request": map[string]any{"type": "delay", "delayMillis": 5,
+			"watch": map[string]any{"trigger": map[string]any{"codes": []string{"vmd"}}, "actions": calls}},
+	})
+	if code != 400 || !strings.Contains(body, want) {
+		t.Fatalf("saved: %d %s", code, body)
+	}
+
+	rule := map[string]any{
+		"name": "outer rule", "enabled": true,
+		"trigger": map[string]any{"codes": []string{"vmd"}},
+		"actions": []map[string]any{{"type": "delay", "delayMillis": 5,
+			"watch": map[string]any{"trigger": map[string]any{"codes": []string{"vmd"}}, "ifNoMatch": calls}}},
+	}
+	code, body = ta.do(t, ta.alice, "POST", "/api/rules", rule)
+	if code != 400 || !strings.Contains(body, want) {
+		t.Fatalf("rule: %d %s", code, body)
+	}
+}

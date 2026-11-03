@@ -97,10 +97,14 @@ func TestAllActionsIncludesWatchActions(t *testing.T) {
 	}
 }
 
-func TestSavedDelayCantWatch(t *testing.T) {
+func TestSavedDelayCanWatch(t *testing.T) {
 	sr := SavedRequest{Name: "x", Request: Action{Type: ActionDelay, DelayMillis: 5, Watch: &Watch{Trigger: Trigger{Codes: []string{"vmd"}}, Stop: true}}}
-	if err := sr.Validate(); err == nil || !strings.Contains(err.Error(), "saved delay") {
-		t.Fatalf("err = %v", err)
+	if err := sr.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	topics := sr.Request.Watch.Trigger.Topics
+	if topics == nil || len(topics) != 0 {
+		t.Fatalf("topics = %#v, want empty non-nil", topics)
 	}
 }
 

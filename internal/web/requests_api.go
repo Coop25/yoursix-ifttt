@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,11 @@ import (
 // it uses secrets it belongs to that admin (see actions.runSavedRequest).
 func (s *Server) checkRequestActions(r *http.Request, editorID string, acts []rules.Action) error {
 	for i, a := range acts {
+		if a.Type == rules.ActionDelay && a.Watch != nil {
+			if err := s.checkNestedWatch(r.Context(), a.Watch); err != nil {
+				return &rules.ActionError{Index: i, Err: err}
+			}
+		}
 		if a.Type != rules.ActionRequest {
 			continue
 		}
@@ -100,6 +106,9 @@ func (s *Server) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.checkSavedWatch(w, r, sr) {
+		return
+	}
 	created, err := s.store.CreateRequest(r.Context(), sr, by)
 	if err != nil {
 		s.storeError(w, err)
@@ -122,6 +131,9 @@ func (s *Server) handleUpdateRequest(w http.ResponseWriter, r *http.Request) {
 	sr.ID = id
 	by, ok := s.requestEditor(w, r, sr)
 	if !ok {
+		return
+	}
+	if !s.checkSavedWatch(w, r, sr) {
 		return
 	}
 	updated, err := s.store.UpdateRequest(r.Context(), sr, by)
@@ -190,4 +202,45 @@ func (s *Server) handleTestRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"run": run, "event": ev})
+}
+
+// checkSavedWatch rejects a saved delay whose watch runs another watching
+// delay, answering the request itself when it does.
+func (s *Server) checkSavedWatch(w http.ResponseWriter, r *http.Request, sr rules.SavedRequest) bool {
+	if sr.Request.Watch == nil {
+		return true
+	}
+	if err := s.checkNestedWatch(r.Context(), sr.Request.Watch); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return false
+	}
+	return true
+}
+
+// checkNestedWatch rejects a watch whose actions call a saved delay that
+// itself watches: only one delay may be watching at a time, so such a call
+// could never run.
+func (s *Server) checkNestedWatch(ctx context.Context, w *rules.Watch) error {
+	lists := []struct {
+		label string
+		acts  []rules.Action
+	}{{"on-match", w.Actions}, {"if-no-match", w.IfNoMatch}}
+	for _, l := range lists {
+		for i, a := range l.acts {
+			if a.Type != rules.ActionRequest {
+				continue
+			}
+			sr, err := s.store.SavedRequest(ctx, a.RequestID)
+			if errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("watch: %s action %d: saved action #%d doesn't exist", l.label, i+1, a.RequestID)
+			}
+			if err != nil {
+				return err
+			}
+			if sr.Request.Watch != nil {
+				return fmt.Errorf("watch: %s action %d: saved action %q watches for events, so it can't run while another delay is watching", l.label, i+1, sr.Name)
+			}
+		}
+	}
+	return nil
 }
