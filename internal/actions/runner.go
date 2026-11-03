@@ -85,6 +85,10 @@ type RunOptions struct {
 	// OnWatch, if set, is called on each match of a watched delay with what
 	// it has seen so far and when it will now end.
 	OnWatch func(index int, a rules.Action, w WatchResult, until time.Time)
+
+	// inWatch is set while running a watch's own actions, where a delay can't
+	// watch for events itself.
+	inWatch bool
 }
 
 func NewRunner(defaultDiscordWebhook, version string) *Runner {
@@ -147,6 +151,28 @@ func (r *Runner) RunWith(ctx context.Context, actions []rules.Action, data map[s
 			}
 			if stop {
 				stopped = true
+			}
+		} else if a.Type == rules.ActionRequest {
+			var sr rules.SavedRequest
+			var withParams map[string]any
+			sr, withParams, err = r.resolveSaved(ctx, a, data, lk, opts.Owner, &res)
+			switch {
+			case err != nil:
+			case sr.Request.Type == rules.ActionDelay && sr.Request.Watch != nil:
+				if opts.inWatch {
+					err = fmt.Errorf("saved action %q watches for events, so it can't run while another delay is watching", sr.Name)
+					break
+				}
+				var stop, failed bool
+				stop, failed, err = r.watchedDelay(ctx, i, sr.Request, withParams, opts, start, &res)
+				if failed {
+					ok = false
+				}
+				if stop {
+					stopped = true
+				}
+			default:
+				err = r.runResolved(ctx, sr, withParams, lk, opts.Owner, &res)
 			}
 		} else {
 			err = r.runOne(ctx, a, data, lk, opts.Owner, &res)
@@ -628,15 +654,16 @@ func noSecrets(string) (string, error) {
 	return "", errors.New("secrets can't be used in saved-action parameters; put the secret in the saved action itself")
 }
 
-// runSavedRequest runs a saved action (an HTTP request, delay or Discord
-// message) with the rule's parameter values.
-func (r *Runner) runSavedRequest(ctx context.Context, a rules.Action, data map[string]any, lk SecretLookup, owner string, res *StepResult) error {
+// resolveSaved loads the saved action a refers to, checks its secrets belong
+// to owner, and renders the rule's parameters. It returns the saved action and
+// data with .params added.
+func (r *Runner) resolveSaved(ctx context.Context, a rules.Action, data map[string]any, lk SecretLookup, owner string, res *StepResult) (rules.SavedRequest, map[string]any, error) {
 	if r.Requests == nil {
-		return errors.New("saved actions are not available")
+		return rules.SavedRequest{}, nil, errors.New("saved actions are not available")
 	}
 	sr, err := r.Requests.SavedRequest(ctx, a.RequestID)
 	if err != nil {
-		return fmt.Errorf("saved action #%d: %w", a.RequestID, err)
+		return rules.SavedRequest{}, nil, fmt.Errorf("saved action #%d: %w", a.RequestID, err)
 	}
 	if res.Name == "" {
 		res.Name = sr.Name
@@ -644,23 +671,23 @@ func (r *Runner) runSavedRequest(ctx context.Context, a rules.Action, data map[s
 	// Re-checked at run time, against the action as it is now.
 	refs, err := SecretRefs([]rules.Action{sr.Request})
 	if err != nil {
-		return fmt.Errorf("saved action %q: %w", sr.Name, err)
+		return sr, nil, fmt.Errorf("saved action %q: %w", sr.Name, err)
 	}
 	if len(refs) > 0 && sr.UpdatedBy != owner {
-		return fmt.Errorf("saved action %q uses secrets belonging to %s; only their rules can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))
+		return sr, nil, fmt.Errorf("saved action %q uses secrets belonging to %s; only their rules can use it", sr.Name, nameOr(sr.UpdatedByName, "another admin"))
 	}
 
 	given := make(map[string]string, len(a.Params))
 	for k, v := range a.Params {
 		rv, err := Render(v, data, noSecrets)
 		if err != nil {
-			return fmt.Errorf("parameter %s: %w", k, err)
+			return sr, nil, fmt.Errorf("parameter %s: %w", k, err)
 		}
 		given[k] = rv
 	}
 	params, err := sr.ResolveParams(given)
 	if err != nil {
-		return err
+		return sr, nil, err
 	}
 
 	withParams := make(map[string]any, len(data)+1)
@@ -668,6 +695,21 @@ func (r *Runner) runSavedRequest(ctx context.Context, a rules.Action, data map[s
 		withParams[k] = v
 	}
 	withParams["params"] = params
+	return sr, withParams, nil
+}
+
+// runSavedRequest runs a saved action (an HTTP request, delay or Discord
+// message) with the rule's parameter values.
+func (r *Runner) runSavedRequest(ctx context.Context, a rules.Action, data map[string]any, lk SecretLookup, owner string, res *StepResult) error {
+	sr, withParams, err := r.resolveSaved(ctx, a, data, lk, owner, res)
+	if err != nil {
+		return err
+	}
+	return r.runResolved(ctx, sr, withParams, lk, owner, res)
+}
+
+// runResolved runs a saved action already resolved by resolveSaved.
+func (r *Runner) runResolved(ctx context.Context, sr rules.SavedRequest, withParams map[string]any, lk SecretLookup, owner string, res *StepResult) error {
 	switch sr.Request.Type {
 	case "", rules.ActionHTTP:
 		req := sr.Request

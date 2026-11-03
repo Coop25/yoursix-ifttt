@@ -3,6 +3,7 @@ package actions
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"yoursix-ifttt/internal/mocktarget"
 	"yoursix-ifttt/internal/rules"
@@ -290,5 +292,96 @@ func TestWatchRegexFilters(t *testing.T) {
 	}
 	if _, err := renderWatch(filter("^{{ .data.deviceName }}[$"), data); err == nil || !strings.Contains(err.Error(), "regexquote") {
 		t.Fatalf("invalid regex: %v", err)
+	}
+}
+
+type fakeSaved map[int64]rules.SavedRequest
+
+func (f fakeSaved) SavedRequest(_ context.Context, id int64) (rules.SavedRequest, error) {
+	sr, ok := f[id]
+	if !ok {
+		return rules.SavedRequest{}, errors.New("not found")
+	}
+	return sr, nil
+}
+
+// savedDelay is a saved 30 ms delay that watches as w says.
+func savedDelay(w *rules.Watch, params ...rules.Param) fakeSaved {
+	return fakeSaved{1: {ID: 1, Name: "Wait", Params: params, Request: rules.Action{Type: rules.ActionDelay, DelayMillis: 30, Watch: w}}}
+}
+
+func savedRunner(src SavedRequestSource) *Runner {
+	r := NewRunner("", "test")
+	r.Requests = src
+	return r
+}
+
+func TestSavedDelayWatchRestarts(t *testing.T) {
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}, Restart: true, MaxMillis: 200})
+	opts := RunOptions{Watch: func(rules.Trigger) (<-chan yoursix.Event, func()) {
+		ch := make(chan yoursix.Event, 1)
+		time.AfterFunc(20*time.Millisecond, func() { ch <- yoursix.Event{EventCode: "vmd"} })
+		return ch, func() {}
+	}}
+	res, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{}, opts)
+	if !ok || len(res) != 1 || !res[0].OK || res[0].Watch == nil || res[0].Watch.Restarts != 1 || res[0].DurationMs < 45 {
+		t.Fatalf("ok=%v res=%+v", ok, res)
+	}
+}
+
+func TestSavedDelayWatchUsesParams(t *testing.T) {
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Filters: []rules.Filter{{Field: "deviceName", Op: rules.OpEquals, Value: "{{ .params.cam }}"}}}},
+		rules.Param{Name: "cam"})
+	var got rules.Trigger
+	opts := RunOptions{Watch: func(tr rules.Trigger) (<-chan yoursix.Event, func()) {
+		got = tr
+		return nil, func() {}
+	}}
+	acts := []rules.Action{{Type: rules.ActionRequest, RequestID: 1, Params: map[string]string{"cam": "CAM-01"}}}
+	if _, ok := savedRunner(src).RunWith(context.Background(), acts, map[string]any{}, opts); !ok {
+		t.Fatal("not ok")
+	}
+	if len(got.Filters) != 1 || got.Filters[0].Value != "CAM-01" {
+		t.Fatalf("trigger %+v", got)
+	}
+}
+
+func TestSavedDelayWatchSameAsCallingRule(t *testing.T) {
+	src := savedDelay(&rules.Watch{SameAsTrigger: true})
+	var got rules.Trigger
+	opts := RunOptions{RuleTrigger: rules.Trigger{Codes: []string{"pir"}}, Watch: func(tr rules.Trigger) (<-chan yoursix.Event, func()) {
+		got = tr
+		return nil, func() {}
+	}}
+	if _, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{}, opts); !ok {
+		t.Fatal("not ok")
+	}
+	if len(got.Codes) != 1 || got.Codes[0] != "pir" {
+		t.Fatalf("trigger %+v", got)
+	}
+}
+
+func TestSavedDelayWatchWithoutRule(t *testing.T) {
+	src := savedDelay(&rules.Watch{SameAsTrigger: true})
+	opts := RunOptions{Watch: func(rules.Trigger) (<-chan yoursix.Event, func()) {
+		t.Fatal("subscribed without a rule trigger")
+		return nil, nil
+	}}
+	res, ok := savedRunner(src).RunWith(context.Background(), []rules.Action{{Type: rules.ActionRequest, RequestID: 1}}, map[string]any{}, opts)
+	if !ok || len(res) != 1 || res[0].Watch == nil || res[0].Watch.Note == "" {
+		t.Fatalf("ok=%v res=%+v", ok, res)
+	}
+}
+
+func TestNestedWatchingSavedDelayFails(t *testing.T) {
+	src := savedDelay(&rules.Watch{Trigger: rules.Trigger{Codes: []string{"vmd"}}})
+	acts := []rules.Action{{Type: rules.ActionDelay, DelayMillis: 10, Watch: &rules.Watch{
+		Trigger:   rules.Trigger{Codes: []string{"pir"}},
+		IfNoMatch: []rules.Action{{Type: rules.ActionRequest, RequestID: 1}},
+	}}}
+	res, ok := savedRunner(src).RunWith(context.Background(), acts, map[string]any{}, RunOptions{})
+	if ok || len(res) != 1 || res[0].Watch == nil || len(res[0].Watch.Steps) != 1 ||
+		!strings.Contains(res[0].Watch.Steps[0].Error, "can't run while another delay is watching") {
+		t.Fatalf("ok=%v res=%+v", ok, res)
 	}
 }

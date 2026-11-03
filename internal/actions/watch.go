@@ -24,6 +24,8 @@ type WatchResult struct {
 	Steps []StepResult `json:"steps,omitempty"`
 	// Dropped counts results left out of Steps beyond maxWatchSteps.
 	Dropped int `json:"dropped,omitempty"`
+	// Note explains why a watch didn't behave as configured.
+	Note string `json:"note,omitempty"`
 }
 
 // WatchFunc subscribes to events matching t until stop is called.
@@ -58,7 +60,7 @@ func (r *Runner) watchedDelay(ctx context.Context, i int, a rules.Action, data m
 		data["watch"] = WatchData(*out, lastEv, time.Since(start))
 	}
 	runActs := func(acts []rules.Action, match int) {
-		steps, ok := r.RunWith(ctx, acts, data, RunOptions{Secrets: opts.Secrets, Owner: opts.Owner})
+		steps, ok := r.RunWith(ctx, acts, data, RunOptions{Secrets: opts.Secrets, Owner: opts.Owner, inWatch: true})
 		if !ok {
 			failed = true
 		}
@@ -73,7 +75,11 @@ func (r *Runner) watchedDelay(ctx context.Context, i int, a rules.Action, data m
 	}
 
 	var events <-chan yoursix.Event
-	if opts.Watch != nil {
+	rt := opts.RuleTrigger
+	switch {
+	case w.SameAsTrigger && len(rt.Topics) == 0 && len(rt.Codes) == 0 && len(rt.Filters) == 0:
+		out.Note = "nothing to compare against: this action is being tested without a rule"
+	case opts.Watch != nil:
 		// Only the watch's own filters are templates, not the rule's.
 		own, err := renderWatch(w.Trigger, data)
 		if err != nil {
